@@ -44,7 +44,7 @@ object ExpGolombMulti {
       val prefixLength = high - firstSet
       val sigLengthMinusOne = prefixLength + prefixLength + k
       val low = high - sigLengthMinusOne
-      val decoded = ExpGolombSingle.decode(sig >> low, sigLengthMinusOne, k)
+      val decoded = ExpGolombSingle.decode(sig >> low, k)
       decoded +: decode(in, low - 1.U, k, n - 1)
     } else Seq()
   }
@@ -86,11 +86,10 @@ class ExpGolombEncodeSingleModule(width: Int) extends Module {
 
 class ExpGolombDecodeSingleModule(width: Int) extends Module {
   val in = IO(Input(UInt(width.W)))
-  val high = IO(Input(UInt(log2Up(width).W)))
   val k = IO(Input(UInt(log2Up(width).W)))
   val out = IO(Output(UInt(width.W)))
 
-  out := ExpGolombSingle.decode(in, high, k)
+  out := ExpGolombSingle.decode(in, k)
 }
 
 class ExpGolombEncodeMultiModule(n: Int, width: Int) extends Module {
@@ -130,13 +129,47 @@ class PackDropLSBsModule(n: Int, width: Int, outWidth: Int) extends Module {
   outShift := resShift
 }
 
+class ExpGolombEncodeBlockModule(n: Int, width: Int, blockWidth: Int) extends Module {
+  val ins = IO(Input(Vec(n, UInt(width.W))))
+  val k = IO(Input(UInt(log2Up(width).W)))
+  val out = IO(Output(UInt(blockWidth.W)))
+  val outShift = IO(Output(UInt(log2Up(width).W)))
+
+  val (resOut, resShift) = ExpGolombBlock.encode(ins, k, blockWidth)
+  out := resOut
+  outShift := resShift
+}
+
+class ExpGolombDecodeBlockModule(n: Int, width: Int, blockWidth: Int) extends Module {
+  val in = IO(Input(UInt(blockWidth.W)))
+  val k = IO(Input(UInt(log2Up(width).W)))
+  val shift = IO(Input(UInt(log2Up(width).W)))
+  val outs = IO(Output(Vec(n, UInt(width.W))))
+
+  outs := VecInit(ExpGolombBlock.decode(in, k, shift, n))
+}
+
 object Golomb {
-  def encode(n: Int, k: Int): String = {
+  def encodeInt(n: Int, k: Int): Int = {
     require(n >= 0)
     require(k >= 0)
-    val encodedBinary = (n + (1 << k)).toBinaryString
+    n + (1 << k)
+  }
+
+  def encode(n: Int, k: Int): String = {
+    val encodedBinary = encodeInt(n, k).toBinaryString
     val encodedUnary = "0" * (encodedBinary.length - k - 1)
     encodedUnary + encodedBinary
+  }
+
+  def decodeInt(n: Int, k: Int): Int = {
+    require(n >= (1 << k))
+    require(k >= 0)
+    n - (1 << k)
+  }
+
+  def decode(s: String, k: Int): Int = {
+    decodeInt(Integer.parseInt(s, 2), k)
   }
 }
 
@@ -148,12 +181,23 @@ object StrBits {
     s"${"0" * outPadLen.toInt}$binStr"
   }
 
+  def apply[T <: Data](data: T, high: Int): String = {
+    apply(data.peek().litValue, high)
+  }
+
   def apply[T <: Data](data: T, high: UInt): String = {
     apply(data.peek().litValue, high.peek().litValue)
   }
 
   def apply[T <: Data](data: T): String = {
     data.peek().litValue.toString(2)
+  }
+}
+
+object StrGroupedSeq {
+  def apply(s: String, takeSeq: Seq[Int]): Seq[String] = {
+    if (takeSeq.isEmpty) Seq()
+    else s.take(takeSeq.head) +: apply(s.drop(takeSeq.head), takeSeq.tail)
   }
 }
 
@@ -215,11 +259,9 @@ class Playground extends AnyFlatSpec with ChiselScalatestTester {
 //        i <- 0 to 29
 //      } {
 //        val in = i + (1 << k)
-//        val high = 2 * log2Floor(in) - k
 //        c.in.poke(in.U)
-//        c.high.poke(high.U)
 //        c.k.poke(k.U)
-//        println(s"(k == $k) ${StrBits(in, high)} <--> ${c.out.peek().litValue}")
+//        println(s"(k == $k) ${in.toBinaryString} <--> ${c.out.peek().litValue}")
 //      }
 //    }
 //  }
@@ -275,30 +317,124 @@ class Playground extends AnyFlatSpec with ChiselScalatestTester {
 //    }
 //  }
 
-  it should "PackDropLSBs" in {
-//    val ins = 8 to 15
+//  it should "PackDropLSBs" in {
+////    val ins = 8 to 15
+////    val width = 8
+////    val highs = ins.map(in => log2Up(in + 1) - 1)
+////    val outWidth = ins.length * 2
+//    val ins = Seq(12, 0, 13, 1, 14, 2, 15, 3)
 //    val width = 8
-//    val highs = ins.map(in => log2Up(in + 1) - 1)
-//    val outWidth = ins.length * 2
-    val ins = Seq(12, 0, 13, 1, 14, 2, 15, 3)
-    val width = 8
-    val highs = Seq(3, 1, 3, 1, 3, 1, 3, 1)
-    val outWidth = 20
-    test(new PackDropLSBsModule(ins.length, width, outWidth)) { c =>
-      c.ins.zip(ins).foreach { case (inHw, in) => inHw.poke(in.U) }
-      c.inHighs.zip(highs).foreach { case (highHw, high) => highHw.poke(high.U) }
-      c.clock.step()
+//    val highs = Seq(3, 1, 3, 1, 3, 1, 3, 1)
+//    val outWidth = 20
+//    test(new PackDropLSBsModule(ins.length, width, outWidth)) { c =>
+//      c.ins.zip(ins).foreach { case (inHw, in) => inHw.poke(in.U) }
+//      c.inHighs.zip(highs).foreach { case (highHw, high) => highHw.poke(high.U) }
+//      c.clock.step()
+//
+//      println(s"Ins: " + ins.map(_.toBinaryString).mkString(" "))
+//      println(
+//        s"Outs: " + c.outs
+//          .zip(c.outHighs)
+//          .map {
+//            case (out, outHigh) => s"${out.peek()}{${out.peek().litValue.toString(2)}}[${outHigh.peek()}:0]"
+//          }
+//          .mkString(" ")
+//      )
+//      println(s"Shift: ${c.outShift.peek()}")
+//    }
+//  }
 
-      println(s"Ins: " + ins.map(_.toBinaryString).mkString(" "))
-      println(
-        s"Outs: " + c.outs
-          .zip(c.outHighs)
-          .map {
-            case (out, outHigh) => s"${out.peek()}{${out.peek().litValue.toString(2)}}[${outHigh.peek()}:0]"
-          }
-          .mkString(" ")
-      )
-      println(s"Shift: ${c.outShift.peek()}")
+//  it should "ExpGolombBlock.encode" in {
+////    val ins = 8 to 15
+////    val width = 8
+////    val k = 3
+////    val outWidth = ins.length * 6
+//    val ins = Seq(12, 0, 13, 1, 14, 2, 15, 3)
+//    val width = 8
+//    val k = 3
+//    val outWidth = 32
+//
+//    val encoded = ins.map(Golomb.encode(_, k))
+//    test(new ExpGolombEncodeBlockModule(ins.length, width, outWidth)) { c =>
+//      c.ins.zip(ins).foreach { case (inHw, in) => inHw.poke(in.U) }
+//      c.k.poke(k.U)
+//      c.clock.step()
+//      val outBits =
+//        StrGroupedSeq(
+//          StrBits(c.out, outWidth - 1),
+//          encoded.map { s => 1.max(s.length - c.outShift.peek().litValue.toInt) }
+//        )
+//      val (outPadded, encodedPadded) = outBits
+//        .zip(encoded)
+//        .map { case (sHw, s) => (sHw.padTo(s.length, " ").mkString, s.padTo(sHw.length, " ").mkString) }
+//        .unzip
+//      println(s"In:      " + ins.map(_.toBinaryString).mkString(" "))
+//      println(s"Encoded: " + encodedPadded.mkString(" "))
+//      println(
+//        s"Out:     " + outPadded.mkString("", " ", " ") +
+//          s"(${c.out.peek()}) " +
+//          s"(>> ${c.outShift.peek()})".stripMargin
+//      )
+//    }
+//  }
+
+  it should "ExpGolombBlock.decode" in {
+    def shiftUnshift(n: Int, shift: Int): Int = {
+      require(shift >= 0)
+      1.max(n >> shift) << shift
+    }
+
+//    val n = 8
+//    val width = 8
+//    val k = 3
+//    val encoded = "010000010001010010010011010100010101010110010111"
+//    val shift = 0
+////    val encoded = "0100001000010010100101010010100101101011"
+////    val shift = 1
+////    val encoded = "01000100010001000101010101010101"
+////    val shift = 2
+////    val encoded = "010010010010010010010010"
+////    val shift = 3
+////    val encoded = "0101010101010101"
+////    val shift = 4
+////    val encoded = "11111111"
+////    val shift = 5
+//    val expected = (8 to 15)
+//      .map(Golomb.encodeInt(_, k))
+//      .map(shiftUnshift(_, shift))
+//      .map(Golomb.decodeInt(_, k))
+
+    val n = 8
+    val width = 8
+    val k = 3
+    val encoded = "0101001000010101100101011010100101111011"
+    val shift = 0
+//    val encoded = "01010100010101000101110101011101"
+//    val shift = 1
+//    val encoded = "010110010110010110010110"
+//    val shift = 2
+//    val encoded = "0101010101010101"
+//    val shift = 3
+//    val encoded = "11111111"
+//    val shift = 5
+    val expected = Seq(12, 0, 13, 1, 14, 2, 15, 3)
+      .map(Golomb.encodeInt(_, k))
+      .map(shiftUnshift(_, shift))
+      .map(Golomb.decodeInt(_, k))
+
+    val expectedBits = expected.map(_.toBinaryString)
+    test(new ExpGolombDecodeBlockModule(n, width, encoded.length)) { c =>
+      c.in.poke(s"b$encoded".U)
+      c.k.poke(k.U)
+      c.shift.poke(shift.U)
+      c.clock.step()
+      val outs = c.outs.map(_.peek().litValue.toInt)
+      val outsBits = c.outs.zip(expectedBits).map { case (out, exp) => StrBits(out, exp.length - 1) }
+      println("In:       " + encoded)
+//      println("Out:      " + outsBits.mkString(" "))
+//      println("Expected: " + expectedBits.mkString(" "))
+      println("Out:      " + outs.mkString(" "))
+      println("Expected: " + expected.mkString(" "))
     }
   }
 }

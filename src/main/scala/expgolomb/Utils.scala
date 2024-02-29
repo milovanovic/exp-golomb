@@ -156,8 +156,47 @@ object ExpGolombSingle {
     (out, outHigh + outHigh - k)
   }
 
-  def decode(in: Bits, high: UInt, k: UInt): UInt = {
+  def decode(in: Bits, k: UInt): UInt = {
     require(in.widthKnown, "Input data width must be known")
-    WireDefault(UInt((in.getWidth / 2).W), ApplyHighMask(in, high)) - (1.U << k).asUInt
+    WireDefault(UInt((in.getWidth / 2).W), in.asUInt) - (1.U << k).asUInt
+  }
+}
+
+/**
+  * Encodes a sequence of integers into a block of fixed size, or vice versa, dropping the same number of
+  * least-significant bits from each encoded sample as needed. After encoding and dropping LSBs, each sample
+  * will be at least one bit wide, and will have at least one set bit.
+  */
+object ExpGolombBlock {
+  def encode(in: Seq[UInt], k: UInt, blockWidth: Int): (UInt, UInt) = {
+    require(blockWidth >= in.length, "blockWidth must be at least as large as the length of in")
+    val encoded = in.map(ExpGolombSingle.encode(_, k))
+    val (shifted, droppedLSBs) = PackDropLSBs(encoded, blockWidth)
+    val adjusted = shifted.map {
+      case (field, high) => (field.asUInt | (field === 0.U), high)
+    }
+    val (cat, catHigh) = DynamicHighCat(adjusted)
+    val catShifted = cat << ((blockWidth - 1).U - catHigh)
+//    assert(catHigh <= (blockWidth - 1).U)
+    (WireDefault(UInt(blockWidth.W), catShifted.asUInt), droppedLSBs)
+  }
+
+  def decode(in: UInt, k: UInt, shift: UInt, numSamples: Int): Seq[UInt] = {
+    require(in.widthKnown, "in must have a known width")
+
+    def recoverSamples(n: Int = numSamples, high: UInt = (in.getWidth - 1).U): Seq[UInt] = {
+      if (n > 0) {
+        val sig = if (n == numSamples) in else ApplyHighMask(in, high)
+        val highestSet = Log2(sig)
+        val prefixWidth = high - highestSet
+        val sampleWidthMinusOne = prefixWidth + prefixWidth + k
+        val samplePackedWidthMinusOne = Mux(sampleWidthMinusOne > shift, sampleWidthMinusOne - shift, 0.U)
+        val low = high - samplePackedWidthMinusOne
+        val recovered = (sig >> low) << shift
+        recovered.asUInt +: recoverSamples(n - 1, low - 1.U)
+      } else Seq()
+    }
+
+    recoverSamples().map(ExpGolombSingle.decode(_, k))
   }
 }
