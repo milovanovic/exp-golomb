@@ -16,16 +16,6 @@ object ApplyHighMask {
 }
 
 /**
-  * Version of Log2 which trims the output bit width to the ceiling logarithm of input bit width.
-  */
-object Log2Trimmed {
-  def apply(in: Bits): UInt = {
-    require(in.widthKnown, "in must have a known width")
-    WireDefault(UInt(log2Up(in.getWidth).W), Log2(in))
-  }
-}
-
-/**
   * Concatenates multiple signals, each by a respective dynamic number of least-significant bits.
   */
 object DynamicHighCat {
@@ -76,19 +66,72 @@ object DynamicHighCat {
 }
 
 /**
-  * Returns mean position of highest set bit in a sequence of signals.
+  * Determines the number of significant bits in a signal.
   */
-object MeanHighBit {
+object BitWidth {
+  def apply(in: Bits): UInt = {
+    val res = Mux(in === 0.U, 0.U, Log2(in).asUInt +& 1.U)
+    in.widthOption.fold(res) { w => WireDefault(UInt(log2Up(w + 1).W), res) }
+  }
+}
+
+/**
+  * Performs unsigned integer division by a constant divisor value.
+  */
+object DivideByConst {
+  def apply(resultMax: Int, divisor: Int)(in: UInt): UInt = {
+    require(resultMax >= 0, "resultMax must be greater than or equal to zero")
+    require(divisor > 0, "divisor must be greater than zero")
+
+    def muxTree(divMin: Int, divCur: Int, divMax: Int): UInt = {
+      if (divCur == divMin) divCur.U
+      else
+        Mux(
+          in <= (divCur * divisor - 1).U,
+          muxTree(divMin, (divMin + divCur) / 2, divCur),
+          muxTree(divCur, (divCur + divMax + 1) / 2, divMax)
+        )
+    }
+
+    if (isPow2(divisor)) {
+      val shiftRight = log2Floor(divisor)
+      if (shiftRight > 0) (in >> log2Floor(divisor)).asUInt
+      else in
+    } else muxTree(0, resultMax / 2, resultMax)
+  }
+
+  def rounded(resultMax: Int, divisor: Int)(in: UInt): UInt = {
+    require(resultMax >= 0, "resultMax must be greater than or equal to zero")
+    require(divisor > 0, "divisor must be greater than zero")
+
+    def muxTree(divMin: Int, divCur: Int, divMax: Int): UInt = {
+      if (divCur == divMax) divCur.U
+      else
+        Mux(
+          in <= ((divCur * divisor + (divCur + 1) * divisor) / 2).U,
+          muxTree(divMin, (divMin + divCur) / 2, divCur),
+          muxTree(divCur, (divCur + divMax + 1) / 2, divMax)
+        )
+    }
+
+    if (isPow2(divisor)) {
+      val shiftRight = log2Floor(divisor)
+      if (shiftRight > 0) (in >> shiftRight).asUInt +& in(shiftRight - 1)
+      else in
+    } else muxTree(0, resultMax / 2, resultMax)
+  }
+}
+
+/**
+  * Calculates mean (significant) bit width of a sequence of signals.
+  */
+object MeanBitWidth {
   def apply(in: Seq[Bits]): UInt = {
-    require(
-      in.nonEmpty && ((in.length & (in.length - 1)) == 0),
-      "in must be a nonempty sequence with a length of a power of two"
-    )
-    require(in.forall(_.widthKnown), "All elements of in must have a known width")
-    val resWidth = log2Up(Math.ceil(in.map(_.getWidth).sum / in.length.toFloat).toInt)
-    val res = (in.map(Log2Trimmed(_)).reduce(_ +& _) >> log2Floor(in.length)).asUInt
-//    println(s"Res: $res")
-    WireDefault(UInt(resWidth.W), res)
+    require(in.forall(_.widthKnown), "all elements of in must have known width")
+    val divisor = in.length
+    val resMax = Math.round(in.map(_.getWidth).sum.toDouble / divisor).toInt
+    val res = DivideByConst.rounded(resMax, divisor)(in.map(BitWidth(_)).reduce(_ +& _))
+    WireDefault(UInt(log2Up(resMax + 1).W), res)
   }
 }
 
@@ -101,9 +144,9 @@ object PackDropLSBs {
     require(in.nonEmpty)
     require(outWidth >= in.length, "outWidth is too small")
     val (fields, _) = in.unzip
+    require(fields.forall(_.widthKnown), "All elements of in must have known width")
     val sumWidth = fields.map(_.getWidth).sum
     val maxWidth = fields.map(_.getWidth).max
-    require(fields.forall(_.widthKnown), "All elements of in must have known width")
 
 //    def printRow(row: Seq[(Bits, UInt)]): Unit = {
 //      printf(cf"Row: " + row.map { case (field, high) => cf"$field%b[$high:0]" }.reduce(_ + _) + "\n")
@@ -115,7 +158,7 @@ object PackDropLSBs {
     }
 
     @tailrec
-    def makeShiftLattice(
+    def shiftLattice(
       row:         Seq[(Bits, UInt)],
       n:           Int,
       i:           Int = 0,
@@ -131,16 +174,13 @@ object PackDropLSBs {
             else (field, high)
         }
 //        printRow(newRow)
-        makeShiftLattice(newRow, n - 1, i + 1, shiftAmount + shiftEnable.asUInt)
+        shiftLattice(newRow, n - 1, i + 1, shiftAmount + shiftEnable.asUInt)
       } else (row, shiftAmount)
     }
 
     val (resultRow, shiftAmount) =
       if (sumWidth <= outWidth) (in, 0.U)
-      else makeShiftLattice(in, maxWidth)
-
-//    val (res, high) = DynamicHighCat(resultRow)
-//    printf(cf"Cat Result: (>> $shiftAmount) $res%b[$high:0]\n")
+      else shiftLattice(in, maxWidth)
     (resultRow, shiftAmount)
   }
 }
@@ -184,7 +224,7 @@ object ExpGolombBlock {
   def decode(in: UInt, k: UInt, shift: UInt, numSamples: Int): Seq[UInt] = {
     require(in.widthKnown, "in must have a known width")
 
-    def recoverSamples(n: Int = numSamples, high: UInt = (in.getWidth - 1).U): Seq[UInt] = {
+    def recoverSamples(n: Int, high: UInt = (in.getWidth - 1).U): Seq[UInt] = {
       if (n > 0) {
         val sig = if (n == numSamples) in else ApplyHighMask(in, high)
         val highestSet = Log2(sig)
@@ -197,6 +237,6 @@ object ExpGolombBlock {
       } else Seq()
     }
 
-    recoverSamples().map(ExpGolombSingle.decode(_, k))
+    recoverSamples(numSamples).map(ExpGolombSingle.decode(_, k))
   }
 }

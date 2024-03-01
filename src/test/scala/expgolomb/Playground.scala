@@ -16,6 +16,20 @@ object Log2Cat {
 }
 
 /**
+  * Returns mean position of highest set bit in a sequence of signals.
+  */
+object MeanHighBit {
+  def apply(in: Seq[Bits]): UInt = {
+    require(isPow2(in.length), "in must be a nonempty sequence with a length of a power of two")
+    require(in.forall(_.widthKnown), "All elements of in must have a known width")
+    val resWidth = log2Up(Math.ceil(in.map(_.getWidth).sum / in.length.toFloat).toInt)
+    val res = (in.map(Log2(_)).reduce(_ +& _) >> log2Floor(in.length)).asUInt
+    //    println(s"Res: $res")
+    WireDefault(UInt(resWidth.W), res)
+  }
+}
+
+/**
   * Encodes or decodes a sequence of integers.
   */
 object ExpGolombMulti {
@@ -52,8 +66,9 @@ object ExpGolombMulti {
 
 class TestableExpression[T <: Data, U <: Data](tIn: T, tOutOption: Option[U] = None)(exp: T => U) extends Module {
   val in = IO(Input(tIn))
-  val out = IO(Output(tOutOption.getOrElse(tIn)))
-  out := exp(in)
+  val res = exp(in)
+  val out = IO(Output(tOutOption.getOrElse(chiselTypeOf(res))))
+  out := res
 }
 
 class DynamicHighCatModule(n: Int) extends Module {
@@ -149,6 +164,13 @@ class ExpGolombDecodeBlockModule(n: Int, width: Int, blockWidth: Int) extends Mo
   outs := VecInit(ExpGolombBlock.decode(in, k, shift, n))
 }
 
+class MeanBitWidthModule(n: Int, width: Int) extends Module {
+  val ins = IO(Input(Vec(n, UInt(width.W))))
+  val out = IO(Output(UInt(log2Up(width + 1).W)))
+
+  out := MeanBitWidth(ins)
+}
+
 object Golomb {
   def encodeInt(n: Int, k: Int): Int = {
     require(n >= 0)
@@ -202,11 +224,11 @@ object StrGroupedSeq {
 }
 
 class Playground extends AnyFlatSpec with ChiselScalatestTester {
-//  it should "Log2" in test(new TestableExpression(UInt(8.W))(Log2(_: UInt))) { c =>
+//  it should "Log2" in test(new TestableExpression[UInt, UInt](UInt(8.W))(Log2(_))) { c =>
 //    for (i <- 0 to 64) {
 //      c.in.poke(i.U)
 //      val res = c.out.peek().litValue.toInt
-//      println(s"${i.toBinaryString} <> ${(1 << res).toBinaryString} <--> : Log2($i) == $res")
+//      println(s"${i.toBinaryString} <> ${(1 << res).toBinaryString} <--> : Log2($i) == ${c.out.peek()}")
 //    }
 //  }
 
@@ -378,63 +400,122 @@ class Playground extends AnyFlatSpec with ChiselScalatestTester {
 //    }
 //  }
 
-  it should "ExpGolombBlock.decode" in {
-    def shiftUnshift(n: Int, shift: Int): Int = {
-      require(shift >= 0)
-      1.max(n >> shift) << shift
-    }
-
+//  it should "ExpGolombBlock.decode" in {
+//    def shiftUnshift(n: Int, shift: Int): Int = {
+//      require(shift >= 0)
+//      1.max(n >> shift) << shift
+//    }
+//
+////    val n = 8
+////    val width = 8
+////    val k = 3
+////    val encoded = "010000010001010010010011010100010101010110010111"
+////    val shift = 0
+//////    val encoded = "0100001000010010100101010010100101101011"
+//////    val shift = 1
+//////    val encoded = "01000100010001000101010101010101"
+//////    val shift = 2
+//////    val encoded = "010010010010010010010010"
+//////    val shift = 3
+//////    val encoded = "0101010101010101"
+//////    val shift = 4
+//////    val encoded = "11111111"
+//////    val shift = 5
+////    val expected = (8 to 15)
+////      .map(Golomb.encodeInt(_, k))
+////      .map(shiftUnshift(_, shift))
+////      .map(Golomb.decodeInt(_, k))
+//
 //    val n = 8
 //    val width = 8
 //    val k = 3
-//    val encoded = "010000010001010010010011010100010101010110010111"
+//    val encoded = "0101001000010101100101011010100101111011"
 //    val shift = 0
-////    val encoded = "0100001000010010100101010010100101101011"
+////    val encoded = "01010100010101000101110101011101"
 ////    val shift = 1
-////    val encoded = "01000100010001000101010101010101"
+////    val encoded = "010110010110010110010110"
 ////    val shift = 2
-////    val encoded = "010010010010010010010010"
-////    val shift = 3
 ////    val encoded = "0101010101010101"
-////    val shift = 4
+////    val shift = 3
 ////    val encoded = "11111111"
 ////    val shift = 5
-//    val expected = (8 to 15)
+//    val expected = Seq(12, 0, 13, 1, 14, 2, 15, 3)
 //      .map(Golomb.encodeInt(_, k))
 //      .map(shiftUnshift(_, shift))
 //      .map(Golomb.decodeInt(_, k))
+//
+//    val expectedBits = expected.map(_.toBinaryString)
+//    test(new ExpGolombDecodeBlockModule(n, width, encoded.length)) { c =>
+//      c.in.poke(s"b$encoded".U)
+//      c.k.poke(k.U)
+//      c.shift.poke(shift.U)
+//      c.clock.step()
+//      val outs = c.outs.map(_.peek().litValue.toInt)
+//      val outsBits = c.outs.zip(expectedBits).map { case (out, exp) => StrBits(out, exp.length - 1) }
+//      println("In:       " + encoded)
+////      println("Out:      " + outsBits.mkString(" "))
+////      println("Expected: " + expectedBits.mkString(" "))
+//      println("Out:      " + outs.mkString(" "))
+//      println("Expected: " + expected.mkString(" "))
+//    }
+//  }
 
-    val n = 8
+//  it should "DivideByConst" in {
+//    val width = 8
+//    val divisor = 7
+//    val maxIn = (1 << width) - 1
+//    val maxOut = maxIn / divisor
+//    test(new TestableExpression[UInt, UInt](UInt(width.W))(DivideByConst.rounded(maxOut, divisor)(_))) { c =>
+//      for (in <- 0 to maxIn) {
+//        c.in.poke(in.U)
+//        c.clock.step()
+//        val out = c.out.peek().litValue.toInt
+////        val exp = in / divisor
+//        val exp = Math.round(in.toDouble / divisor)
+//        println(s"In: $in; Out: $out; Expected: $exp")
+//        assertResult(exp)(out)
+//      }
+//    }
+//  }
+
+//  it should "BitWidth" in {
+//    val width = 8
+//    val maxIn = (1 << width) - 1
+//    test(new TestableExpression[UInt, UInt](UInt(width.W))(BitWidth(_))) { c =>
+//      for (in <- 0 to maxIn) {
+//        c.in.poke(in.U)
+//        c.clock.step()
+//        val out = c.out.peek().litValue.toInt
+//        val exp = if (in == 0) 0 else in.toBinaryString.length
+//        println(s"In: $in; Out: $out; Expected: $exp")
+//        assertResult(exp)(out)
+//      }
+//    }
+//  }
+
+  it should "MeanBitWidth" in {
+    def bitWidth(n: Int): Int = {
+      if (n == 0) 0 else n.toBinaryString.length
+    }
+
     val width = 8
-    val k = 3
-    val encoded = "0101001000010101100101011010100101111011"
-    val shift = 0
-//    val encoded = "01010100010101000101110101011101"
-//    val shift = 1
-//    val encoded = "010110010110010110010110"
-//    val shift = 2
-//    val encoded = "0101010101010101"
-//    val shift = 3
-//    val encoded = "11111111"
-//    val shift = 5
-    val expected = Seq(12, 0, 13, 1, 14, 2, 15, 3)
-      .map(Golomb.encodeInt(_, k))
-      .map(shiftUnshift(_, shift))
-      .map(Golomb.decodeInt(_, k))
-
-    val expectedBits = expected.map(_.toBinaryString)
-    test(new ExpGolombDecodeBlockModule(n, width, encoded.length)) { c =>
-      c.in.poke(s"b$encoded".U)
-      c.k.poke(k.U)
-      c.shift.poke(shift.U)
-      c.clock.step()
-      val outs = c.outs.map(_.peek().litValue.toInt)
-      val outsBits = c.outs.zip(expectedBits).map { case (out, exp) => StrBits(out, exp.length - 1) }
-      println("In:       " + encoded)
-//      println("Out:      " + outsBits.mkString(" "))
-//      println("Expected: " + expectedBits.mkString(" "))
-      println("Out:      " + outs.mkString(" "))
-      println("Expected: " + expected.mkString(" "))
+    val n = 5
+    test(new MeanBitWidthModule(n, width)).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+      for {
+        i <- Seq(0, 1, 2, 4, 8, 16, 32, 64, 128)
+        j <- Seq(0, 1, 3, 5, 9, 17, 33, 65, 129)
+        k <- Seq(0, 1, 3, 6, 10, 18, 34, 66, 130)
+        l <- Seq(0, 1, 3, 7, 11, 19, 35, 67, 131)
+        m <- Seq(0, 1, 3, 7, 12, 20, 36, 68, 132)
+      } {
+        val ins = Seq(i, j, k, l, m).take(n)
+        c.ins.zip(ins).foreach { case (inHw, in) => inHw.poke(in.U) }
+        c.clock.step()
+        val out = c.out.peek().litValue.toInt
+        val exp = Math.round(ins.map(bitWidth).sum.toFloat / n)
+        println(s"Ins: ${ins.map(_.toBinaryString).mkString(" ")}; Out: $out; Expected: $exp")
+        assertResult(out)(exp)
+      }
     }
   }
 }
