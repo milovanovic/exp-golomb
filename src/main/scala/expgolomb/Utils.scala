@@ -6,6 +6,16 @@ import chisel3.util._
 import scala.annotation.tailrec
 
 /**
+  * Version of RegEnable which takes an optional enable signal which determines whether the register should be
+  * constructed at all.
+  */
+object RegEnableCond {
+  def apply[T <: Data](next: T, cond: Option[Bool]): T = cond.fold(next)(RegEnable(next, _))
+
+  def apply[T <: Data](next: T, init: T, cond: Option[Bool]): T = cond.fold(next)(RegEnable(next, init, _))
+}
+
+/**
   * Creates and applies a bit-mask to a signal based on the position of its highest least-significant bit,
   * effectively truncating the signal value to in[high:0].
   */
@@ -32,29 +42,31 @@ object DynamicHighCat {
         val newRes = res | (fieldMasked << shift).asUInt
         val newShift = shift + high + 1.U
 
-//        printInfo = printInfo.appended((
-//          res,
-//          shift,
-//          field,
-//          high,
-//          fieldMask,
-//          newRes,
-//          newShift
-//        ))
+//        printInfo = printInfo.appended(
+//          (
+//            res,
+//            shift,
+//            field,
+//            high,
+//            fieldMasked,
+//            newRes,
+//            newShift
+//          )
+//        )
 
         (newRes, newShift)
     }
 
-//    printInfo.foreach { case (res, shift, field, high, fieldMask, newRes, newShift) =>
-//      printf(cf"res:      $res%b\n")
-//      printf(cf"shift:    $shift\n")
-//      printf(cf"field:    $field%b[$high:0]\n")
-//      printf(cf"fmask:    $fieldMask%b\n")
-//      printf(cf"masked:   ${field.asUInt & fieldMask}%b\n")
-//      printf(cf"shifted:  ${((field.asUInt & fieldMask) << shift).asUInt}%b\n")
-//      printf(cf"newRes:   $newRes%b\n")
-//      printf(cf"newShift: $newShift\n")
-//      printf("\n")
+//    printInfo.foreach {
+//      case (res, shift, field, high, fieldMasked, newRes, newShift) =>
+//        printf(cf"res:      $res%b\n")
+//        printf(cf"shift:    $shift\n")
+//        printf(cf"field:    $field%b[$high:0]\n")
+//        printf(cf"masked:   $fieldMasked%b\n")
+//        printf(cf"shifted:  ${(fieldMasked << shift).asUInt}%b\n")
+//        printf(cf"newRes:   $newRes%b\n")
+//        printf(cf"newShift: $newShift\n")
+//        printf("\n")
 //    }
 
     val high = resultMaskShift - 1.U
@@ -126,12 +138,13 @@ object DivideByConst {
   * Calculates mean (significant) bit width of a sequence of signals.
   */
 object MeanBitWidth {
-  def apply(in: Seq[Bits]): UInt = {
+  def apply(in: Seq[Bits], resultMaxCapOption: Option[Int] = None): UInt = {
     require(in.forall(_.widthKnown), "all elements of in must have known width")
     val divisor = in.length
     val resMax = Math.round(in.map(_.getWidth).sum.toDouble / divisor).toInt
-    val res = DivideByConst.rounded(resMax, divisor)(in.map(BitWidth(_)).reduce(_ +& _))
-    WireDefault(UInt(log2Up(resMax + 1).W), res)
+    val resMaxCapped = resultMaxCapOption.fold(resMax)(resMax.min(_))
+    val res = DivideByConst.rounded(resMaxCapped, divisor)(in.map(BitWidth(_)).reduce(_ +& _))
+    WireDefault(UInt(log2Up(resMaxCapped + 1).W), res)
   }
 }
 
@@ -140,7 +153,7 @@ object MeanBitWidth {
   * each signal's dynamic high value) fits a requested bit-width.
   */
 object PackDropLSBs {
-  def apply(in: Seq[(Bits, UInt)], outWidth: Int): (Seq[(Bits, UInt)], UInt) = {
+  def apply(in: Seq[(Bits, UInt)], outWidth: Int, useRegEnable: Option[Bool]): (Seq[(Bits, UInt)], UInt) = {
     require(in.nonEmpty)
     require(outWidth >= in.length, "outWidth is too small")
     val (fields, _) = in.unzip
@@ -165,16 +178,24 @@ object PackDropLSBs {
       shiftAmount: UInt = 0.U(log2Up(maxWidth).W)
     ): (Seq[(Bits, UInt)], UInt) = {
       if (n > 0) {
-        val lenSum = row.map { case (_, high) => high }.reduce(_ +& _) +& row.length.U
+        val lenSum = WireDefault(
+          UInt(log2Up(row.map { case (field, _) => field.getWidth }.sum).W),
+          row.map { case (_, high) => high }.reduce(_ +& _) +& row.length.U
+        )
 //        printf(cf"lenSum: $lenSum\n")
-        val shiftEnable = lenSum > outWidth.U
+        val shiftEnable = RegEnableCond(lenSum, useRegEnable) > outWidth.U
         val newRow = row.map {
           case (field, high) =>
             if (i < field.getWidth) shiftBy(field, high, shiftEnable, 1)
             else (field, high)
         }
+        val newShiftAmount = shiftAmount + shiftEnable.asUInt
 //        printRow(newRow)
-        shiftLattice(newRow, n - 1, i + 1, shiftAmount + shiftEnable.asUInt)
+        val outRow = newRow.map {
+          case (field, high) =>
+            (RegEnableCond(field, useRegEnable), RegEnableCond(high, useRegEnable))
+        }
+        shiftLattice(outRow, n - 1, i + 1, newShiftAmount)
       } else (row, shiftAmount)
     }
 
@@ -182,6 +203,11 @@ object PackDropLSBs {
       if (sumWidth <= outWidth) (in, 0.U)
       else shiftLattice(in, maxWidth)
     (resultRow, shiftAmount)
+  }
+
+  def delay(maxWidth: Int, sumWidth: Int, outWidth: Int): Int = {
+    if (sumWidth <= outWidth) 0
+    else maxWidth
   }
 }
 
@@ -208,17 +234,22 @@ object ExpGolombSingle {
   * will be at least one bit wide, and will have at least one set bit.
   */
 object ExpGolombBlock {
-  def encode(in: Seq[UInt], k: UInt, blockWidth: Int): (UInt, UInt) = {
+  def encode(in: Seq[UInt], k: UInt, blockWidth: Int, useRegEnable: Option[Bool]): (UInt, UInt) = {
     require(blockWidth >= in.length, "blockWidth must be at least as large as the length of in")
-    val encoded = in.map(ExpGolombSingle.encode(_, k))
-    val (shifted, droppedLSBs) = PackDropLSBs(encoded, blockWidth)
+    val encoded = in
+      .map(ExpGolombSingle.encode(_, k))
+      .map { case (field, high) => (RegEnableCond(field, useRegEnable), RegEnableCond(high, useRegEnable)) }
+    val (shifted, droppedLSBs) = PackDropLSBs(encoded, blockWidth, useRegEnable)
     val adjusted = shifted.map {
       case (field, high) => (field.asUInt | (field === 0.U), high)
     }
     val (cat, catHigh) = DynamicHighCat(adjusted)
     val catShifted = cat << ((blockWidth - 1).U - catHigh)
-//    assert(catHigh <= (blockWidth - 1).U)
     (WireDefault(UInt(blockWidth.W), catShifted.asUInt), droppedLSBs)
+  }
+
+  def encodeDelay(inWidths: Seq[Int], blockWidth: Int): Int = {
+    1 + PackDropLSBs.delay(inWidths.max, inWidths.sum, blockWidth)
   }
 
   def decode(in: UInt, k: UInt, shift: UInt, numSamples: Int): Seq[UInt] = {

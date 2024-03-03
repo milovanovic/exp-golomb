@@ -137,7 +137,7 @@ class PackDropLSBsModule(n: Int, width: Int, outWidth: Int) extends Module {
   val outHighs = IO(Output(Vec(n, UInt(log2Up(width).W))))
   val outShift = IO(Output(UInt(log2Up(width).W)))
 
-  val (resRow, resShift) = PackDropLSBs(ins.zip(inHighs), outWidth)
+  val (resRow, resShift) = PackDropLSBs(ins.zip(inHighs), outWidth, None)
   val (resOuts, resHighs) = resRow.unzip
   outs := VecInit(resOuts)
   outHighs := VecInit(resHighs)
@@ -150,7 +150,7 @@ class ExpGolombEncodeBlockModule(n: Int, width: Int, blockWidth: Int) extends Mo
   val out = IO(Output(UInt(blockWidth.W)))
   val outShift = IO(Output(UInt(log2Up(width).W)))
 
-  val (resOut, resShift) = ExpGolombBlock.encode(ins, k, blockWidth)
+  val (resOut, resShift) = ExpGolombBlock.encode(ins, k, blockWidth, None)
   out := resOut
   outShift := resShift
 }
@@ -510,10 +510,10 @@ class Playground extends AnyFlatSpec with ChiselScalatestTester {
       } {
         val ins = Seq(i, j, k, l, m).take(n)
         c.ins.zip(ins).foreach { case (inHw, in) => inHw.poke(in.U) }
-        c.clock.step()
+//        c.clock.step()
         val out = c.out.peek().litValue.toInt
         val exp = Math.round(ins.map(bitWidth).sum.toFloat / n)
-        println(s"Ins: ${ins.map(_.toBinaryString).mkString(" ")}; Out: $out; Expected: $exp")
+//        println(s"Ins: ${ins.map(_.toBinaryString).mkString(" ")}; Out: $out; Expected: $exp")
         assertResult(out)(exp)
       }
     }
