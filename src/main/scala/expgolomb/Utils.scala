@@ -16,12 +16,66 @@ object RegEnableCond {
 }
 
 /**
+  * Version of ShiftRegister which takes an optional enable signal which determines whether the register should be
+  * constructed at all.
+  */
+object ShiftRegisterCond {
+  def apply[T <: Data](in: T, n: Int, cond: Option[Bool]): T = cond.fold(in)(ShiftRegister(in, n, _))
+
+  def apply[T <: Data](in: T, n: Int, resetData: T, cond: Option[Bool]): T =
+    cond.fold(in)(ShiftRegister(in, n, resetData, _))
+}
+
+/**
   * Creates and applies a bit-mask to a signal based on the position of its highest least-significant bit,
   * effectively truncating the signal value to in[high:0].
   */
 object ApplyHighMask {
   def apply(in: Bits, high: UInt): UInt = {
     in.asUInt & WireDefault(chiselTypeOf(in), (1.U << (high + 1.U)).asUInt - 1.U).asUInt
+  }
+}
+
+/**
+  * Performs a width-extending summation by pre-calculating the result width as an alternative to using reduction
+  * with the +& operator. Also enables the use of a divide-and-conquer strategy with registers with enable signals.
+  */
+object SumExtended {
+  private val divideAndConquerThreshold = 4
+
+  def apply(
+    in:           Seq[UInt],
+    useRegEnable: Option[Bool]
+  ): UInt = {
+    require(in.nonEmpty, "in must not be empty")
+    require(in.forall(_.widthKnown), "All elements of in must have known width")
+
+    val resultWidth = in.map(_.getWidth).max + in.length - 1
+    def reduce(in: Seq[UInt]): UInt = {
+      in.tail.fold(WireDefault(UInt(resultWidth.W), in.head))(_ + _)
+    }
+
+    useRegEnable.fold(reduce(in)) { enable =>
+      def internal(in: Seq[UInt]): UInt = {
+        if (in.length <= divideAndConquerThreshold) {
+          RegEnable(reduce(in), enable)
+        } else {
+          val (first, second) = in.splitAt(in.length / 2)
+          internal(Seq(first, second).map(internal))
+        }
+      }
+      internal(in)
+    }
+  }
+
+  def delay(inLength: Int): Int = {
+    if (inLength <= divideAndConquerThreshold) 1
+    else {
+      val first = delay(inLength / 2)
+      val second = delay(inLength - inLength / 2)
+      assert(first == second)
+      first.max(second) + 1
+    }
   }
 }
 
@@ -91,7 +145,7 @@ object BitWidth {
   * Performs unsigned integer division by a constant divisor value.
   */
 object DivideByConst {
-  def apply(resultMax: Int, divisor: Int)(in: UInt): UInt = {
+  def apply(divisor: Int, resultMax: Int)(in: UInt): UInt = {
     require(resultMax >= 0, "resultMax must be greater than or equal to zero")
     require(divisor > 0, "divisor must be greater than zero")
 
@@ -112,7 +166,7 @@ object DivideByConst {
     } else muxTree(0, resultMax / 2, resultMax)
   }
 
-  def rounded(resultMax: Int, divisor: Int)(in: UInt): UInt = {
+  def rounded(divisor: Int, resultMax: Int)(in: UInt): UInt = {
     require(resultMax >= 0, "resultMax must be greater than or equal to zero")
     require(divisor > 0, "divisor must be greater than zero")
 
@@ -138,13 +192,17 @@ object DivideByConst {
   * Calculates mean (significant) bit width of a sequence of signals.
   */
 object MeanBitWidth {
-  def apply(in: Seq[Bits], resultMaxCapOption: Option[Int] = None): UInt = {
+  def apply(in: Seq[Bits], useRegEnable: Option[Bool], resultMaxCapOption: Option[Int] = None): UInt = {
     require(in.forall(_.widthKnown), "all elements of in must have known width")
     val divisor = in.length
     val resMax = Math.round(in.map(_.getWidth).sum.toDouble / divisor).toInt
     val resMaxCapped = resultMaxCapOption.fold(resMax)(resMax.min(_))
-    val res = DivideByConst.rounded(resMaxCapped, divisor)(in.map(BitWidth(_)).reduce(_ +& _))
+    val res = DivideByConst.rounded(divisor, resMaxCapped)(SumExtended(in.map(BitWidth(_)), useRegEnable))
     WireDefault(UInt(log2Up(resMaxCapped + 1).W), res)
+  }
+
+  def delay(inLength: Int): Int = {
+    SumExtended.delay(inLength)
   }
 }
 
@@ -153,13 +211,26 @@ object MeanBitWidth {
   * each signal's dynamic high value) fits a requested bit-width.
   */
 object PackDropLSBs {
+  private def calculateMaxShift(widths: Seq[Int], outWidth: Int): Int = {
+    @tailrec
+    def internal(shiftAmount: Int): Int = {
+      assert(shiftAmount < widths.max)
+      val shiftedTotalWidth = widths.map(w => (w - shiftAmount).max(1)).sum
+      if (shiftedTotalWidth > outWidth) internal(shiftAmount + 1)
+      else shiftAmount
+    }
+    internal(0)
+  }
+
   def apply(in: Seq[(Bits, UInt)], outWidth: Int, useRegEnable: Option[Bool]): (Seq[(Bits, UInt)], UInt) = {
     require(in.nonEmpty)
     require(outWidth >= in.length, "outWidth is too small")
     val (fields, _) = in.unzip
     require(fields.forall(_.widthKnown), "All elements of in must have known width")
-    val sumWidth = fields.map(_.getWidth).sum
-    val maxWidth = fields.map(_.getWidth).max
+    val widths = fields.map(_.getWidth)
+
+    val maxShift = calculateMaxShift(widths, outWidth)
+//    println("maxShift: " + maxShift)
 
 //    def printRow(row: Seq[(Bits, UInt)]): Unit = {
 //      printf(cf"Row: " + row.map { case (field, high) => cf"$field%b[$high:0]" }.reduce(_ + _) + "\n")
@@ -175,18 +246,21 @@ object PackDropLSBs {
       row:         Seq[(Bits, UInt)],
       n:           Int,
       i:           Int = 0,
-      shiftAmount: UInt = 0.U(log2Up(maxWidth).W)
+      shiftAmount: UInt = 0.U(log2Up(maxShift + 1).W)
     ): (Seq[(Bits, UInt)], UInt) = {
       if (n > 0) {
         val lenSum = WireDefault(
           UInt(log2Up(row.map { case (field, _) => field.getWidth }.sum).W),
-          row.map { case (_, high) => high }.reduce(_ +& _) +& row.length.U
+          SumExtended(row.map { case (_, high) => high }, useRegEnable)
         )
 //        printf(cf"lenSum: $lenSum\n")
-        val shiftEnable = RegEnableCond(lenSum, useRegEnable) > outWidth.U
+        val shiftEnable = lenSum > (outWidth - row.length).max(0).U
+        val shiftEnableDelay = SumExtended.delay(row.length)
         val newRow = row.map {
           case (field, high) =>
-            if (i < field.getWidth) shiftBy(field, high, shiftEnable, 1)
+            def delayed[T <: Data](in: T): T =
+              ShiftRegisterCond(in, shiftEnableDelay, useRegEnable)
+            if (i < field.getWidth) shiftBy(delayed(field), delayed(high), shiftEnable, 1)
             else (field, high)
         }
         val newShiftAmount = shiftAmount + shiftEnable.asUInt
@@ -199,15 +273,13 @@ object PackDropLSBs {
       } else (row, shiftAmount)
     }
 
-    val (resultRow, shiftAmount) =
-      if (sumWidth <= outWidth) (in, 0.U)
-      else shiftLattice(in, maxWidth)
-    (resultRow, shiftAmount)
+    if (widths.sum <= outWidth) (in, 0.U)
+    else shiftLattice(in, maxShift)
   }
 
-  def delay(maxWidth: Int, sumWidth: Int, outWidth: Int): Int = {
-    if (sumWidth <= outWidth) 0
-    else maxWidth
+  def delay(inWidths: Seq[Int], outWidth: Int): Int = {
+    if (inWidths.sum <= outWidth) 0
+    else calculateMaxShift(inWidths, outWidth) * (SumExtended.delay(inWidths.length) + 1)
   }
 }
 
@@ -249,7 +321,7 @@ object ExpGolombBlock {
   }
 
   def encodeDelay(inWidths: Seq[Int], blockWidth: Int): Int = {
-    1 + PackDropLSBs.delay(inWidths.max, inWidths.sum, blockWidth)
+    1 + PackDropLSBs.delay(inWidths, blockWidth)
   }
 
   def decode(in: UInt, k: UInt, shift: UInt, numSamples: Int): Seq[UInt] = {

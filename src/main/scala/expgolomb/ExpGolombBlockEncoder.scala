@@ -14,25 +14,25 @@ class ExpGolombBlockEncoder(n: Int, elemWidth: Int, totalBlockWidth: Int, kWidth
 
   val in = IO(Flipped(Decoupled(Vec(n, UInt(elemWidth.W)))))
   val out = IO(Decoupled(UInt(totalBlockWidth.W)))
-  val ioDelay = 1 + ExpGolombBlock.encodeDelay(Seq.fill(n)(elemWidth), encodedBlockWidth)
 
   private val validResult = RegInit(false.B)
   private val globalEnable = out.ready || !validResult
-  validResult := ShiftRegister(in.valid, ioDelay - 1, false.B, globalEnable)
 
   in.ready := globalEnable
   out.valid := validResult
 
-  private val k = RegEnable(MeanBitWidth(in.bits, Some(maxK)), globalEnable)
+  private val k = RegEnable(MeanBitWidth(in.bits, Some(globalEnable), Some(maxK)), globalEnable)
+  private val kDelay = MeanBitWidth.delay(in.bits.length) + 1
   assert(k.getWidth <= kWidth)
 
   private val (encoded, shift) =
     ExpGolombBlock.encode(
-      RegEnable(in.bits, globalEnable),
+      ShiftRegister(in.bits, kDelay, globalEnable),
       k,
       encodedBlockWidth,
       Some(globalEnable)
     )
+  private val encodeDelay = ExpGolombBlock.encodeDelay(Seq.fill(n)(elemWidth), encodedBlockWidth)
   assert(encoded.getWidth == encodedBlockWidth)
 
   out.bits := Cat(
@@ -40,4 +40,8 @@ class ExpGolombBlockEncoder(n: Int, elemWidth: Int, totalBlockWidth: Int, kWidth
     if (shift.getWidth != shiftWidth) WireDefault(UInt(shiftWidth.W), shift) else shift,
     encoded
   )
+
+  val ioDelay = kDelay + encodeDelay
+  println(s"ioDelay: $ioDelay")
+  validResult := ShiftRegister(in.valid, ioDelay - 1, false.B, globalEnable)
 }
