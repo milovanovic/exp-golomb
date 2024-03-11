@@ -265,11 +265,13 @@ object PackDropLSBs {
         }
         val newShiftAmount = shiftAmount + shiftEnable.asUInt
 //        printRow(newRow)
+
         val outRow = newRow.map {
           case (field, high) =>
             (RegEnableCond(field, useRegEnable), RegEnableCond(high, useRegEnable))
         }
-        shiftLattice(outRow, n - 1, i + 1, newShiftAmount)
+        val outShiftAmount = RegEnableCond(newShiftAmount, useRegEnable)
+        shiftLattice(outRow, n - 1, i + 1, outShiftAmount)
       } else (row, shiftAmount)
     }
 
