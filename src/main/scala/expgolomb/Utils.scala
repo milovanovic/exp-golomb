@@ -37,8 +37,8 @@ object ApplyHighMask {
 }
 
 /**
-  * Performs a width-extending summation by pre-calculating the result width as an alternative to using reduction
-  * with the +& operator. Also enables the use of a divide-and-conquer strategy with registers with enable signals.
+  * Performs a width-extending summation which can be pipelined with registers with enable signals,
+  * using a divide-and-conquer strategy.
   */
 object SumExtended {
   private val divideAndConquerThreshold = 4
@@ -50,9 +50,8 @@ object SumExtended {
     require(in.nonEmpty, "in must not be empty")
     require(in.forall(_.widthKnown), "All elements of in must have known width")
 
-    val resultWidth = in.map(_.getWidth).max + in.length - 1
     def reduce(in: Seq[UInt]): UInt = {
-      in.tail.fold(WireDefault(UInt(resultWidth.W), in.head))(_ + _)
+      in.tail.fold(in.head)(_ +& _)
     }
 
     useRegEnable.fold(reduce(in)) { enable =>
@@ -83,14 +82,15 @@ object SumExtended {
   * Concatenates multiple signals, each by a respective dynamic number of least-significant bits.
   */
 object DynamicHighCat {
-  def apply(in: Seq[(Bits, UInt)]): (UInt, UInt) = {
-    val (fields, _) = in.unzip
+  def apply(in: Seq[(Bits, UInt)], totalWidthOption: Option[Int] = None): (UInt, UInt) = {
+    val (fields, highs) = in.unzip
     require(fields.forall(_.widthKnown), "all fields must have known width")
-    val totalWidth = fields.map(_.getWidth).sum
+    require(highs.forall(_.widthKnown), "all highs must have known width")
+    val totalWidth = totalWidthOption.getOrElse(highs.map(1 << _.getWidth).sum)
 
 //    var printInfo = Seq[(UInt, UInt, Bits, UInt, UInt, UInt, UInt)]()
 
-    val (result, resultMaskShift) = in.foldRight((0.U(totalWidth.W), 0.U(log2Up(totalWidth).W))) {
+    val (result, resultMaskShift) = in.foldRight((0.U, 0.U(log2Up(totalWidth).W))) {
       case ((field: Bits, high: UInt), (res: UInt, shift: UInt)) =>
         val fieldMasked = ApplyHighMask(field, high)
         val newRes = res | (fieldMasked << shift).asUInt
@@ -136,8 +136,7 @@ object DynamicHighCat {
   */
 object BitWidth {
   def apply(in: Bits): UInt = {
-    val res = Mux(in === 0.U, 0.U, Log2(in).asUInt +& 1.U)
-    in.widthOption.fold(res) { w => WireDefault(UInt(log2Up(w + 1).W), res) }
+    Mux(in === 0.U, 0.U, Log2(in).asUInt +& 1.U)
   }
 }
 
@@ -161,8 +160,11 @@ object DivideByConst {
 
     if (isPow2(divisor)) {
       val shiftRight = log2Floor(divisor)
-      if (shiftRight > 0) (in >> log2Floor(divisor)).asUInt
-      else in
+      WireDefault(
+        UInt(log2Up(resultMax + 1).W),
+        if (shiftRight > 0) (in >> log2Floor(divisor)).asUInt
+        else in
+      )
     } else muxTree(0, resultMax / 2, resultMax)
   }
 
@@ -182,8 +184,11 @@ object DivideByConst {
 
     if (isPow2(divisor)) {
       val shiftRight = log2Floor(divisor)
-      if (shiftRight > 0) (in >> shiftRight).asUInt +& in(shiftRight - 1)
-      else in
+      WireDefault(
+        UInt(log2Up(resultMax + 1).W),
+        if (shiftRight > 0) (in >> shiftRight).asUInt +& in(shiftRight - 1)
+        else in
+      )
     } else muxTree(0, resultMax / 2, resultMax)
   }
 }
@@ -197,8 +202,7 @@ object MeanBitWidth {
     val divisor = in.length
     val resMax = Math.round(in.map(_.getWidth).sum.toDouble / divisor).toInt
     val resMaxCapped = resultMaxCapOption.fold(resMax)(resMax.min(_))
-    val res = DivideByConst.rounded(divisor, resMaxCapped)(SumExtended(in.map(BitWidth(_)), useRegEnable))
-    WireDefault(UInt(log2Up(resMaxCapped + 1).W), res)
+    DivideByConst.rounded(divisor, resMaxCapped)(SumExtended(in.map(BitWidth(_)), useRegEnable))
   }
 
   def delay(inLength: Int): Int = {
@@ -225,63 +229,57 @@ object PackDropLSBs {
   def apply(in: Seq[(Bits, UInt)], outWidth: Int, useRegEnable: Option[Bool]): (Seq[(Bits, UInt)], UInt) = {
     require(in.nonEmpty)
     require(outWidth >= in.length, "outWidth is too small")
-    val (fields, _) = in.unzip
+    val (fields, highs) = in.unzip
     require(fields.forall(_.widthKnown), "All elements of in must have known width")
     val widths = fields.map(_.getWidth)
 
-    val maxShift = calculateMaxShift(widths, outWidth)
-//    println("maxShift: " + maxShift)
-
-//    def printRow(row: Seq[(Bits, UInt)]): Unit = {
-//      printf(cf"Row: " + row.map { case (field, high) => cf"$field%b[$high:0]" }.reduce(_ + _) + "\n")
-//    }
-
-    def shiftBy(field: Bits, high: UInt, enable: Bool, amount: Int): (Bits, UInt) = {
-      val shiftAmount = Mux(enable, Mux(amount.U < high, amount.U, high), 0.U)
-      (field >> shiftAmount, high - shiftAmount)
-    }
-
-    @tailrec
-    def shiftLattice(
-      row:         Seq[(Bits, UInt)],
-      n:           Int,
-      i:           Int = 0,
-      shiftAmount: UInt = 0.U(log2Up(maxShift + 1).W)
-    ): (Seq[(Bits, UInt)], UInt) = {
-      if (n > 0) {
-        val lenSum = WireDefault(
-          UInt(log2Up(row.map { case (field, _) => field.getWidth }.sum).W),
-          SumExtended(row.map { case (_, high) => high }, useRegEnable)
-        )
-//        printf(cf"lenSum: $lenSum\n")
-        val shiftEnable = lenSum > (outWidth - row.length).max(0).U
-        val shiftEnableDelay = SumExtended.delay(row.length)
-        val newRow = row.map {
-          case (field, high) =>
-            def delayed[T <: Data](in: T): T =
-              ShiftRegisterCond(in, shiftEnableDelay, useRegEnable)
-            if (i < field.getWidth) shiftBy(delayed(field), delayed(high), shiftEnable, 1)
-            else (field, high)
-        }
-        val newShiftAmount = shiftAmount + shiftEnable.asUInt
-//        printRow(newRow)
-
-        val outRow = newRow.map {
-          case (field, high) =>
-            (RegEnableCond(field, useRegEnable), RegEnableCond(high, useRegEnable))
-        }
-        val outShiftAmount = RegEnableCond(newShiftAmount, useRegEnable)
-        shiftLattice(outRow, n - 1, i + 1, outShiftAmount)
-      } else (row, shiftAmount)
-    }
-
     if (widths.sum <= outWidth) (in, 0.U)
-    else shiftLattice(in, maxShift)
+    else {
+      val maxShift = calculateMaxShift(widths, outWidth)
+      val lenSumDelay = SumExtended.delay(in.length)
+      val shiftedLengthsSums: Seq[(UInt, Seq[UInt])] = Seq.tabulate(maxShift + 1) { shiftAmount =>
+        val newHighs =
+          if (shiftAmount == 0) highs
+          else highs.map { high => Mux(high > shiftAmount.U, high - shiftAmount.U, 0.U) }
+        val lenSum = SumExtended(newHighs, useRegEnable)
+        val newHighsDelayed = newHighs.map { high => ShiftRegisterCond(high, lenSumDelay, useRegEnable) }
+        (lenSum, newHighsDelayed)
+      }
+
+      def shiftTree(low: Int, high: Int): (Seq[UInt], UInt) = {
+        if (low == high) {
+          val (_, highsShifted) = shiftedLengthsSums(low)
+          (highsShifted, low.U(log2Up(maxShift + 1).W))
+        } else {
+          val mid = (low + high) / 2
+          val (lenSum, _) = shiftedLengthsSums(mid)
+          val (rightHighs, rightShift) = shiftTree(mid + 1, high)
+          val (leftHighs, leftShift) = shiftTree(low, mid)
+
+          val select: Bool = lenSum > (outWidth - in.length).max(0).U
+          (
+            rightHighs.zip(leftHighs).map { case (rightHigh, leftHigh) => Mux(select, rightHigh, leftHigh) },
+            Mux(select, rightShift, leftShift)
+          )
+        }
+      }
+
+      val (newHighs, shiftAmount) = shiftTree(0, maxShift)
+      val newFields = fields.map(ShiftRegisterCond(_, lenSumDelay, useRegEnable) >> shiftAmount)
+      (
+        newFields.zip(newHighs).map {
+          case (field, high) => (RegEnableCond(field, useRegEnable), RegEnableCond(high, useRegEnable))
+        },
+        RegEnableCond(shiftAmount, useRegEnable)
+      )
+    }
   }
 
   def delay(inWidths: Seq[Int], outWidth: Int): Int = {
     if (inWidths.sum <= outWidth) 0
-    else calculateMaxShift(inWidths, outWidth) * (SumExtended.delay(inWidths.length) + 1)
+    else {
+      1 + SumExtended.delay(inWidths.length)
+    }
   }
 }
 
@@ -291,14 +289,15 @@ object PackDropLSBs {
 object ExpGolombSingle {
   def encode(in: UInt, k: UInt): (UInt, UInt) = {
     require(in.widthKnown, "Input data width must be known")
-    val out = WireDefault(UInt((2 * in.getWidth).W), in) + (1.U << k).asUInt
-    val outHigh = WireDefault(UInt(log2Up(out.getWidth).W), Log2(out))
-    (out, outHigh + outHigh - k)
+    val out = in +& (1.U << k).asUInt
+    val outHighSet = Log2(out)
+    val outHighFull = outHighSet +& outHighSet - k
+    (out, outHighFull)
   }
 
   def decode(in: Bits, k: UInt): UInt = {
     require(in.widthKnown, "Input data width must be known")
-    WireDefault(UInt((in.getWidth / 2).W), in.asUInt) - (1.U << k).asUInt
+    in.asUInt - (1.U << k).asUInt
   }
 }
 
@@ -317,7 +316,7 @@ object ExpGolombBlock {
     val adjusted = shifted.map {
       case (field, high) => (field.asUInt | (field === 0.U), high)
     }
-    val (cat, catHigh) = DynamicHighCat(adjusted)
+    val (cat, catHigh) = DynamicHighCat(adjusted, Some(blockWidth))
     val catShifted = cat << ((blockWidth - 1).U - catHigh)
     (WireDefault(UInt(blockWidth.W), catShifted.asUInt), droppedLSBs)
   }
