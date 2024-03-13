@@ -32,7 +32,7 @@ object ShiftRegisterCond {
   */
 object ApplyHighMask {
   def apply(in: Bits, high: UInt): UInt = {
-    in.asUInt & WireDefault(chiselTypeOf(in), (1.U << (high + 1.U)).asUInt - 1.U).asUInt
+    in.asUInt & WireDefault(chiselTypeOf(in), (1.U << (high +& 1.U)).asUInt - 1.U).asUInt
   }
 }
 
@@ -88,45 +88,15 @@ object DynamicHighCat {
     require(highs.forall(_.widthKnown), "all highs must have known width")
     val totalWidth = totalWidthOption.getOrElse(highs.map(1 << _.getWidth).sum)
 
-//    var printInfo = Seq[(UInt, UInt, Bits, UInt, UInt, UInt, UInt)]()
-
-    val (result, resultMaskShift) = in.foldRight((0.U, 0.U(log2Up(totalWidth).W))) {
-      case ((field: Bits, high: UInt), (res: UInt, shift: UInt)) =>
+    val (result, resultMaskShift) = in.foldRight(0.U, 0.U(log2Up(totalWidth).W)) {
+      case field -> high -> (res -> shift) =>
         val fieldMasked = ApplyHighMask(field, high)
         val newRes = res | (fieldMasked << shift).asUInt
         val newShift = shift + high + 1.U
-
-//        printInfo = printInfo.appended(
-//          (
-//            res,
-//            shift,
-//            field,
-//            high,
-//            fieldMasked,
-//            newRes,
-//            newShift
-//          )
-//        )
-
         (newRes, newShift)
     }
 
-//    printInfo.foreach {
-//      case (res, shift, field, high, fieldMasked, newRes, newShift) =>
-//        printf(cf"res:      $res%b\n")
-//        printf(cf"shift:    $shift\n")
-//        printf(cf"field:    $field%b[$high:0]\n")
-//        printf(cf"masked:   $fieldMasked%b\n")
-//        printf(cf"shifted:  ${(fieldMasked << shift).asUInt}%b\n")
-//        printf(cf"newRes:   $newRes%b\n")
-//        printf(cf"newShift: $newShift\n")
-//        printf("\n")
-//    }
-
     val high = resultMaskShift - 1.U
-//    printf(cf"result: $result%b[$high:0]\n")
-//    printf(cf"wired:  ${WireDefault(UInt(totalWidth.W), result)}%b[$high:0]\n")
-//    printf("\n")
     (WireDefault(UInt(totalWidth.W), result), high)
   }
 }
@@ -144,52 +114,32 @@ object BitWidth {
   * Performs unsigned integer division by a constant divisor value.
   */
 object DivideByConst {
-  def apply(divisor: Int, resultMax: Int)(in: UInt): UInt = {
+  def apply(divisor: Int, resultMax: Int, rounded: Boolean = false)(in: UInt): UInt = {
     require(resultMax >= 0, "resultMax must be greater than or equal to zero")
     require(divisor > 0, "divisor must be greater than zero")
 
-    def muxTree(divMin: Int, divCur: Int, divMax: Int): UInt = {
-      if (divCur == divMin) divCur.U
-      else
+    def muxTree(divMin: Int, divMax: Int): UInt = {
+      if (divMin == divMax) divMax.U
+      else {
+        val divCur = (divMin + divMax) / 2
+        val truncThreshold = (divCur + 1) * divisor
+        val threshold = if (rounded) truncThreshold - divisor / 2 else truncThreshold
         Mux(
-          in <= (divCur * divisor - 1).U,
-          muxTree(divMin, (divMin + divCur) / 2, divCur),
-          muxTree(divCur, (divCur + divMax + 1) / 2, divMax)
+          in < threshold.U,
+          muxTree(divMin, divCur),
+          muxTree(divCur + 1, divMax)
         )
+      }
     }
 
-    if (isPow2(divisor)) {
-      val shiftRight = log2Floor(divisor)
-      WireDefault(
-        UInt(log2Up(resultMax + 1).W),
-        if (shiftRight > 0) (in >> log2Floor(divisor)).asUInt
-        else in
-      )
-    } else muxTree(0, resultMax / 2, resultMax)
-  }
-
-  def rounded(divisor: Int, resultMax: Int)(in: UInt): UInt = {
-    require(resultMax >= 0, "resultMax must be greater than or equal to zero")
-    require(divisor > 0, "divisor must be greater than zero")
-
-    def muxTree(divMin: Int, divCur: Int, divMax: Int): UInt = {
-      if (divCur == divMax) divCur.U
-      else
-        Mux(
-          in <= ((divCur * divisor + (divCur + 1) * divisor) / 2).U,
-          muxTree(divMin, (divMin + divCur) / 2, divCur),
-          muxTree(divCur, (divCur + divMax + 1) / 2, divMax)
-        )
-    }
-
-    if (isPow2(divisor)) {
-      val shiftRight = log2Floor(divisor)
-      WireDefault(
-        UInt(log2Up(resultMax + 1).W),
-        if (shiftRight > 0) (in >> shiftRight).asUInt +& in(shiftRight - 1)
-        else in
-      )
-    } else muxTree(0, resultMax / 2, resultMax)
+    val res =
+      if (divisor == 1) in
+      else if (isPow2(divisor)) {
+        val shiftRight = log2Floor(divisor)
+        val trunc = (in >> shiftRight).asUInt
+        if (rounded) trunc +& in(shiftRight - 1) else trunc
+      } else muxTree(0, resultMax)
+    WireDefault(UInt(log2Up(resultMax + 1).W), res)
   }
 }
 
@@ -202,7 +152,7 @@ object MeanBitWidth {
     val divisor = in.length
     val resMax = Math.round(in.map(_.getWidth).sum.toDouble / divisor).toInt
     val resMaxCapped = resultMaxCapOption.fold(resMax)(resMax.min(_))
-    DivideByConst.rounded(divisor, resMaxCapped)(SumExtended(in.map(BitWidth(_)), useRegEnable))
+    DivideByConst(divisor, resMaxCapped, rounded = true)(SumExtended(in.map(BitWidth(_)), useRegEnable))
   }
 
   def delay(inLength: Int): Int = {
@@ -236,27 +186,27 @@ object PackDropLSBs {
     if (widths.sum <= outWidth) (in, 0.U)
     else {
       val maxShift = calculateMaxShift(widths, outWidth)
-      val lenSumDelay = SumExtended.delay(in.length)
-      val shiftedLengthsSums: Seq[(UInt, Seq[UInt])] = Seq.tabulate(maxShift + 1) { shiftAmount =>
+      val highSumDelay = SumExtended.delay(in.length)
+      val shiftedHighsAndSums: Seq[(UInt, Seq[UInt])] = (0 to maxShift).map { shiftAmount =>
         val newHighs =
           if (shiftAmount == 0) highs
           else highs.map { high => Mux(high > shiftAmount.U, high - shiftAmount.U, 0.U) }
-        val lenSum = SumExtended(newHighs, useRegEnable)
-        val newHighsDelayed = newHighs.map { high => ShiftRegisterCond(high, lenSumDelay, useRegEnable) }
-        (lenSum, newHighsDelayed)
+        val highSum = SumExtended(newHighs, useRegEnable)
+        val newHighsDelayed = newHighs.map { high => ShiftRegisterCond(high, highSumDelay, useRegEnable) }
+        (highSum, newHighsDelayed)
       }
 
       def shiftTree(low: Int, high: Int): (Seq[UInt], UInt) = {
         if (low == high) {
-          val (_, highsShifted) = shiftedLengthsSums(low)
+          val (_, highsShifted) = shiftedHighsAndSums(low)
           (highsShifted, low.U(log2Up(maxShift + 1).W))
         } else {
           val mid = (low + high) / 2
-          val (lenSum, _) = shiftedLengthsSums(mid)
+          val (highSum, _) = shiftedHighsAndSums(mid)
           val (rightHighs, rightShift) = shiftTree(mid + 1, high)
           val (leftHighs, leftShift) = shiftTree(low, mid)
 
-          val select: Bool = lenSum > (outWidth - in.length).max(0).U
+          val select: Bool = highSum > (outWidth - in.length).max(0).U
           (
             rightHighs.zip(leftHighs).map { case (rightHigh, leftHigh) => Mux(select, rightHigh, leftHigh) },
             Mux(select, rightShift, leftShift)
@@ -265,7 +215,7 @@ object PackDropLSBs {
       }
 
       val (newHighs, shiftAmount) = shiftTree(0, maxShift)
-      val newFields = fields.map(ShiftRegisterCond(_, lenSumDelay, useRegEnable) >> shiftAmount)
+      val newFields = fields.map(ShiftRegisterCond(_, highSumDelay, useRegEnable) >> shiftAmount)
       (
         newFields.zip(newHighs).map {
           case (field, high) => (RegEnableCond(field, useRegEnable), RegEnableCond(high, useRegEnable))
@@ -277,9 +227,7 @@ object PackDropLSBs {
 
   def delay(inWidths: Seq[Int], outWidth: Int): Int = {
     if (inWidths.sum <= outWidth) 0
-    else {
-      1 + SumExtended.delay(inWidths.length)
-    }
+    else 1 + SumExtended.delay(inWidths.length)
   }
 }
 
@@ -312,10 +260,10 @@ object ExpGolombBlock {
     val encoded = in
       .map(ExpGolombSingle.encode(_, k))
       .map { case (field, high) => (RegEnableCond(field, useRegEnable), RegEnableCond(high, useRegEnable)) }
+
     val (shifted, droppedLSBs) = PackDropLSBs(encoded, blockWidth, useRegEnable)
-    val adjusted = shifted.map {
-      case (field, high) => (field.asUInt | (field === 0.U), high)
-    }
+    val adjusted = shifted.map { case (field, high) => (field.asUInt | (field === 0.U), high) }
+
     val (cat, catHigh) = DynamicHighCat(adjusted, Some(blockWidth))
     val catShifted = cat << ((blockWidth - 1).U - catHigh)
     (WireDefault(UInt(blockWidth.W), catShifted.asUInt), droppedLSBs)
@@ -340,7 +288,6 @@ object ExpGolombBlock {
         recovered.asUInt +: recoverSamples(n - 1, low - 1.U)
       } else Seq()
     }
-
     recoverSamples(numSamples).map(ExpGolombSingle.decode(_, k))
   }
 }
