@@ -2,9 +2,8 @@ package expgolomb
 import chisel3._
 import chisel3.util._
 import chiseltest._
+import ModelUtils._
 import org.scalatest.flatspec.AnyFlatSpec
-
-import scala.annotation.tailrec
 
 class TestableExpression[T <: Data, U <: Data](tIns: Seq[T], tOutsOption: Option[Seq[U]])(exp: Seq[T] => Seq[U])
     extends Module {
@@ -115,7 +114,7 @@ class UtilsSpec extends AnyFlatSpec with ChiselScalatestTester {
       c.ins.zip(ins).foreach { case (inHw, in) => inHw.poke(in.U) }
       c.highs.zip(highs).foreach { case (highHw, high) => highHw.poke(high) }
 
-      val expectedStr = ins.zip(highs).map { case (n, h) => ("0" * 63 + n.toBinaryString).takeRight(h + 1) }.mkString
+      val expectedStr = ins.zip(highs).map { case (n, h) => highMaskBitString(n, h) }.mkString
       val expectedHigh = highs.sum + highs.length - 1
 
       c.out.expect(BigInt(expectedStr, 2))
@@ -225,7 +224,7 @@ class UtilsSpec extends AnyFlatSpec with ChiselScalatestTester {
       m <- Seq(0, 1, 3, 7, 12, 20, 36, 68, 132)
       ins = Seq(i, j, k, l, m)
     } {
-      val expected = Math.round(ins.map(BigInt(_).bitLength).sum.toFloat / 5)
+      val expected = meanBitWidth(ins)
       c.in.zip(ins).foreach { case (inHw, in) => inHw.poke(in.U) }
       c.out.expect(expected)
     }
@@ -261,21 +260,7 @@ class UtilsSpec extends AnyFlatSpec with ChiselScalatestTester {
     }
   }
 
-  behavior.of("PackDropLSBs")
-
-  def shiftHighs(highs: Seq[Int], blockWidth: Int): (Seq[Int], Int) = {
-    require(blockWidth >= highs.length)
-    @tailrec
-    def internal(shift: Int, lastHighSum: Option[Int]): (Seq[Int], Int) = {
-      val shiftedHighs = highs.map(h => (h - shift).max(0))
-      val lenSum = shiftedHighs.sum + highs.length
-      if (lastHighSum.fold(false)(_ == lenSum) || (lenSum <= blockWidth)) (shiftedHighs, shift)
-      else internal(shift + 1, Some(lenSum))
-    }
-    internal(0, None)
-  }
-
-  it should
+  "PackDropLSBs" should
     "shift each signal until their dynamic widths can fit within a requested block size" in {
     val ins = Seq(13, 67, 150, 188, 52, 108, 110, 164)
 
@@ -315,7 +300,7 @@ class UtilsSpec extends AnyFlatSpec with ChiselScalatestTester {
   it should "be pipeline-able with the correct io delay" in {
     val ins = Seq(13, 67, 150, 188, 52, 108, 110, 164)
 
-    for (blockWidth <- (8 to 1 by -1).map(_ * ins.length))
+    for (blockWidth <- (8 to 1 by -1).map(_ * ins.length)) {
       test(
         new TestablePackDropLSBs[UInt](
           Seq.fill(ins.length)(UInt(8.W)),
@@ -368,5 +353,6 @@ class UtilsSpec extends AnyFlatSpec with ChiselScalatestTester {
           c.clock.step()
         }
       }
+    }
   }
 }

@@ -167,11 +167,11 @@ object MeanBitWidth {
 object PackDropLSBs {
   private def calculateMaxShift(widths: Seq[Int], outWidth: Int): Int = {
     @tailrec
-    def internal(shiftAmount: Int): Int = {
-      assert(shiftAmount < widths.max)
-      val shiftedTotalWidth = widths.map(w => (w - shiftAmount).max(1)).sum
-      if (shiftedTotalWidth > outWidth) internal(shiftAmount + 1)
-      else shiftAmount
+    def internal(shift: Int): Int = {
+      assert(shift < widths.max)
+      val shiftedTotalWidth = widths.map(w => (w - shift).max(1)).sum
+      if (shiftedTotalWidth > outWidth) internal(shift + 1)
+      else shift
     }
     internal(0)
   }
@@ -187,10 +187,10 @@ object PackDropLSBs {
     else {
       val maxShift = calculateMaxShift(widths, outWidth)
       val highSumDelay = SumExtended.delay(in.length)
-      val shiftedHighsAndSums: Seq[(UInt, Seq[UInt])] = (0 to maxShift).map { shiftAmount =>
+      val shiftedHighsAndSums: Seq[(UInt, Seq[UInt])] = (0 to maxShift).map { shift =>
         val newHighs =
-          if (shiftAmount == 0) highs
-          else highs.map { high => Mux(high > shiftAmount.U, high - shiftAmount.U, 0.U) }
+          if (shift == 0) highs
+          else highs.map { high => Mux(high > shift.U, high - shift.U, 0.U) }
         val highSum = SumExtended(newHighs, useRegEnable)
         val newHighsDelayed = newHighs.map { high => ShiftRegisterCond(high, highSumDelay, useRegEnable) }
         (highSum, newHighsDelayed)
@@ -214,13 +214,13 @@ object PackDropLSBs {
         }
       }
 
-      val (newHighs, shiftAmount) = shiftTree(0, maxShift)
-      val newFields = fields.map(ShiftRegisterCond(_, highSumDelay, useRegEnable) >> shiftAmount)
+      val (newHighs, shift) = shiftTree(0, maxShift)
+      val newFields = fields.map(ShiftRegisterCond(_, highSumDelay, useRegEnable) >> shift)
       (
         newFields.zip(newHighs).map {
           case (field, high) => (RegEnableCond(field, useRegEnable), RegEnableCond(high, useRegEnable))
         },
-        RegEnableCond(shiftAmount, useRegEnable)
+        RegEnableCond(shift, useRegEnable)
       )
     }
   }
@@ -273,7 +273,7 @@ object ExpGolombBlock {
     1 + PackDropLSBs.delay(inWidths, blockWidth)
   }
 
-  def decode(in: UInt, k: UInt, shift: UInt, numSamples: Int): Seq[UInt] = {
+  def decode(in: UInt, numSamples: Int, k: UInt, shift: UInt): Seq[UInt] = {
     require(in.widthKnown, "in must have a known width")
 
     def recoverSamples(n: Int, high: UInt = (in.getWidth - 1).U): Seq[UInt] = {
@@ -282,7 +282,8 @@ object ExpGolombBlock {
         val highestSet = Log2(sig)
         val prefixWidth = high - highestSet
         val sampleWidthMinusOne = prefixWidth + prefixWidth + k
-        val samplePackedWidthMinusOne = Mux(sampleWidthMinusOne > shift, sampleWidthMinusOne - shift, 0.U)
+        val samplePackedWidthMinusOne =
+          Mux(sampleWidthMinusOne > shift +& prefixWidth, sampleWidthMinusOne - shift, prefixWidth)
         val low = high - samplePackedWidthMinusOne
         val recovered = (sig >> low) << shift
         recovered.asUInt +: recoverSamples(n - 1, low - 1.U)
