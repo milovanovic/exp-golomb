@@ -51,4 +51,9 @@ object ModelUtils {
     )
     (k.toInt, shift.toInt, encoded)
   }
+
+  def minTotalBlockWidth(n: Int, elemWidth: Int, kWidth: Int, shiftWidth: Int): Int = {
+    val maxShift = (1 << shiftWidth).min(elemWidth) - 1
+    n * (elemWidth + 1 - maxShift).max(1) + kWidth + shiftWidth
+  }
 }

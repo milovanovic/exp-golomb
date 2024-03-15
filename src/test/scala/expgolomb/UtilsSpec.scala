@@ -213,7 +213,7 @@ class UtilsSpec extends AnyFlatSpec with ChiselScalatestTester {
 
   "MeanBitWidth" should "calculate the mean significant bit-width of input samples" in test(
     TestableExpression(Vec(5, UInt(8.W))) {
-      MeanBitWidth(_, None)
+      MeanBitWidth(_, None, None)
     }
   ).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
     for {
@@ -230,8 +230,31 @@ class UtilsSpec extends AnyFlatSpec with ChiselScalatestTester {
     }
   }
 
+  it should "calculate the mean significant bit-width of input samples, with a predetermined maximum result" in {
+    for (maxResult <- 0 to 8) {
+      test(
+        TestableExpression(Vec(5, UInt(8.W))) {
+          MeanBitWidth(_, None, Some(maxResult))
+        }
+      ).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+        for {
+          i <- Seq(0, 1, 2, 4, 8, 16, 32, 64, 128)
+          j <- Seq(0, 1, 3, 5, 9, 17, 33, 65, 129)
+          k <- Seq(0, 1, 3, 6, 10, 18, 34, 66, 130)
+          l <- Seq(0, 1, 3, 7, 11, 19, 35, 67, 131)
+          m <- Seq(0, 1, 3, 7, 12, 20, 36, 68, 132)
+          ins = Seq(i, j, k, l, m)
+        } {
+          val expected = meanBitWidth(ins).min(maxResult)
+          c.in.zip(ins).foreach { case (inHw, in) => inHw.poke(in.U) }
+          c.out.expect(expected)
+        }
+      }
+    }
+  }
+
   it should "be pipeline-able with the correct io delay" in test(TestableExpression(Vec(5, UInt(8.W))) {
-    MeanBitWidth(_, Some(true.B))
+    MeanBitWidth(_, Some(true.B), None)
   }).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
     val insIns = for {
       i <- Seq(0, 1, 2)
@@ -257,6 +280,40 @@ class UtilsSpec extends AnyFlatSpec with ChiselScalatestTester {
     for (expected <- outs.takeRight(ioDelay)) {
       c.out.expect(expected)
       c.clock.step()
+    }
+  }
+
+  it should "be pipeline-able with the correct io delay, with a predetermined maximum result" in {
+    for (maxResult <- 0 to 8) {
+      test(TestableExpression(Vec(5, UInt(8.W))) {
+        MeanBitWidth(_, Some(true.B), Some(maxResult))
+      }).withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+        val insIns = for {
+          i <- Seq(0, 1, 2)
+          j <- Seq(5, 9, 17)
+          k <- Seq(34, 66, 130)
+          l <- Seq(7, 19, 67)
+          m <- Seq(0, 12, 132)
+        } yield Seq(i, j, k, l, m)
+        val outs = insIns.map(_.map(BigInt(_).bitLength).sum.toFloat / 5).map(Math.round(_).min(maxResult))
+        val ioDelay = MeanBitWidth.delay(5)
+
+        for (ins <- insIns.take(ioDelay)) {
+          c.in.zip(ins).foreach { case (inHw, in) => inHw.poke(in.U) }
+          c.clock.step()
+        }
+
+        for (ins -> expected <- insIns.drop(ioDelay).zip(outs)) {
+          c.in.zip(ins).foreach { case (inHw, in) => inHw.poke(in.U) }
+          c.out.expect(expected)
+          c.clock.step()
+        }
+
+        for (expected <- outs.takeRight(ioDelay)) {
+          c.out.expect(expected)
+          c.clock.step()
+        }
+      }
     }
   }
 

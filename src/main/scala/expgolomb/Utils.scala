@@ -269,8 +269,9 @@ object ExpGolombBlock {
     (WireDefault(UInt(blockWidth.W), catShifted.asUInt), droppedLSBs)
   }
 
-  def encodeDelay(inWidths: Seq[Int], blockWidth: Int): Int = {
-    1 + PackDropLSBs.delay(inWidths, blockWidth)
+  def encodeDelay(inWidths: Seq[Int], kWidth: Int, blockWidth: Int): Int = {
+    val widths = inWidths.map(_ + (1 << kWidth))
+    1 + PackDropLSBs.delay(widths, blockWidth)
   }
 
   def decode(in: UInt, numSamples: Int, k: UInt, shift: UInt): Seq[UInt] = {
