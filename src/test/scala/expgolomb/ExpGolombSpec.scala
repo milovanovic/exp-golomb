@@ -187,13 +187,11 @@ class ExpGolombSpec extends AnyFlatSpec with ChiselScalatestTester {
             e <- (0 until 4).map(_ * 85)
           } yield Seq(a, b, c_, d, e)
           assert(inSeq.head.length == n)
-          val expectedSeq = inSeq.map {
-            ExpGolombModel.encodeTotalBlock(_, totalWidth, kWidth, shiftWidth)
-          }
+          val expectedSeq = inSeq.map(ExpGolombModel.encodeTotalBlock(_, totalWidth, kWidth, shiftWidth))
           val ioDelay = c.ioDelay
 
-          c.in.valid.poke(true.B)
-          c.out.ready.poke(true.B)
+          c.in.valid.poke(true)
+          c.out.ready.poke(true)
 
           for (in <- inSeq.take(ioDelay)) {
             c.in.bits.zip(in).foreach { case (inHw, in) => inHw.poke(in) }
@@ -212,6 +210,53 @@ class ExpGolombSpec extends AnyFlatSpec with ChiselScalatestTester {
           for (expected <- expectedSeq.takeRight(ioDelay)) {
             assertResult(tf(expected))(tf(c.out.bits.peek().litValue))
             c.clock.step()
+          }
+        }
+    }
+  }
+
+  "ExpGolombBlockDecoder" should "decode sequences of UInts from encoded blocks" in {
+    val n = 5
+    val width = 8
+    val kWidth = 5
+    val shiftWidth = 5
+    val maxShift = (1 << shiftWidth).min(width) - 1
+    for {
+      encodedWidth <- ((width + 1 - maxShift).max(1) to width).map(_ * n)
+      totalWidth = encodedWidth + kWidth + shiftWidth
+    } {
+      test(new ExpGolombBlockDecoder(n, width, totalWidth, kWidth, shiftWidth))
+        .withAnnotations(Seq(VerilatorBackendAnnotation)) { c =>
+          val inSeq = for {
+            a <- Seq(0, 1)
+            b <- 0 until 4
+            c_ <- (0 until 4).map(_ * 5)
+            d <- (0 until 4).map(_ * 42.333).map(Math.round(_).toInt)
+            e <- (0 until 4).map(_ * 85)
+          } yield Seq(a, b, c_, d, e)
+          assert(inSeq.head.length == n)
+          val encodedSeq = inSeq.map(ExpGolombModel.encodeTotalBlock(_, totalWidth, kWidth, shiftWidth))
+          val expectedSeq = encodedSeq.map(
+            ExpGolombModel.decodeTotalBlock(_, totalWidth, n, kWidth, shiftWidth).map(_ & ((1 << width) - 1))
+          )
+          val ioDelay = c.ioDelay
+
+          c.in.valid.poke(true)
+          c.out.ready.poke(true)
+
+          for (encoded <- encodedSeq.take(ioDelay)) {
+            c.in.bits.poke(encoded)
+            c.clock.step()
+          }
+
+          for (encoded -> expected <- encodedSeq.drop(ioDelay).zip(expectedSeq)) {
+            c.in.bits.poke(encoded)
+            c.out.bits.zip(expected).foreach { case (o, e) => o.expect(e) }
+            c.clock.step()
+          }
+
+          for (expected <- expectedSeq.takeRight(ioDelay)) {
+            c.out.bits.zip(expected).foreach { case (o, e) => o.expect(e) }
           }
         }
     }

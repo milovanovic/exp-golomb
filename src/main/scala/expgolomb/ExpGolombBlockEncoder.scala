@@ -15,7 +15,7 @@ class ExpGolombBlockEncoder(n: Int, elemWidth: Int, totalBlockWidth: Int, kWidth
   val in = IO(Flipped(Decoupled(Vec(n, UInt(elemWidth.W)))))
   val out = IO(Decoupled(UInt(totalBlockWidth.W)))
 
-  private val validResult = RegInit(false.B)
+  private val validResult = Wire(Bool())
   private val globalEnable = out.ready || !validResult
   in.ready := globalEnable
   out.valid := validResult
@@ -44,5 +44,5 @@ class ExpGolombBlockEncoder(n: Int, elemWidth: Int, totalBlockWidth: Int, kWidth
   )
 
   val ioDelay = kDelay + encodeDelay
-  validResult := ShiftRegister(in.valid, ioDelay - 1, false.B, globalEnable)
+  validResult := ShiftRegister(in.valid, ioDelay, false.B, globalEnable)
 }
