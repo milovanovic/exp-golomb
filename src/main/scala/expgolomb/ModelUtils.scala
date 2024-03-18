@@ -24,12 +24,13 @@ object ModelUtils {
     Math.round(in.map(BigInt(_).bitLength).sum.toFloat / in.length)
   }
 
-  def shiftHighs(highs: Seq[Int], blockWidth: Int): (Seq[Int], Int) = {
-    require(blockWidth >= highs.length, "block width must be greater than or equal to the number of input elements")
+  def shiftHighs(highs: Seq[Int], blockWidth: Int, signed: Boolean): (Seq[Int], Int) = {
+    val minBlockWidth = if (signed) 2 * highs.length else highs.length
+    require(blockWidth >= minBlockWidth, "block width must be greater than or equal to the number of input elements")
 
     @tailrec
     def internal(shift: Int, lastHighSum: Option[Int]): (Seq[Int], Int) = {
-      val shiftedHighs = highs.map(h => (h - shift).max(0))
+      val shiftedHighs = highs.map(h => (h - shift).max(if (signed) 1 else 0))
       val lenSum = shiftedHighs.sum + highs.length
       if (
         lastHighSum.fold(false)(_ == lenSum) ||
@@ -52,8 +53,10 @@ object ModelUtils {
     (k.toInt, shift.toInt, encoded)
   }
 
-  def minTotalBlockWidth(n: Int, elemWidth: Int, kWidth: Int, shiftWidth: Int): Int = {
-    val maxShift = (1 << shiftWidth).min(elemWidth) - 1
-    n * (elemWidth + 1 - maxShift).max(1) + kWidth + shiftWidth
+  def minTotalBlockWidth(n: Int, elemWidth: Option[Int], kWidth: Int, shiftWidth: Int, signed: Boolean): Int = {
+    val maxShift = elemWidth.fold((1 << shiftWidth) - 1) { w =>
+      (if (signed) w - 2 else { w - 1 }).min((1 << shiftWidth) - 1)
+    }
+    n * elemWidth.fold(if (signed) 2 else 1)(_ - maxShift) + kWidth + shiftWidth
   }
 }

@@ -342,7 +342,7 @@ class UtilsSpec extends AnyFlatSpec with ChiselScalatestTester {
           highs = Seq(a, b, c_, d, e, f, g, h)
         } {
           assert(ins.length == highs.length)
-          val (expectedHighs, expectedShift) = shiftHighs(highs, blockWidth)
+          val (expectedHighs, expectedShift) = shiftHighs(highs, blockWidth, signed = false)
           val expected = ins.map(_ >> expectedShift)
 
           c.ins.zip(ins).foreach { case (inHw, in) => inHw.poke(in.U) }
@@ -379,7 +379,7 @@ class UtilsSpec extends AnyFlatSpec with ChiselScalatestTester {
         assert(ins.length == highsSeq.head.length)
         val ioDelay = PackDropLSBs.delay(Seq.fill(ins.length)(8), blockWidth)
 
-        val (expectedHighsSeq, expectedShiftSeq) = highsSeq.map(shiftHighs(_, blockWidth)).unzip
+        val (expectedHighsSeq, expectedShiftSeq) = highsSeq.map(shiftHighs(_, blockWidth, signed = false)).unzip
         val expectedSeq = expectedShiftSeq.map(s => ins.map(_ >> s))
 
         c.ins.zip(ins).foreach { case (inHw, in) => inHw.poke(in.U) }

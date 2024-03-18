@@ -53,7 +53,7 @@ class ExpGolombSpec extends AnyFlatSpec with ChiselScalatestTester {
     } {
       c.in.poke(in)
       c.k.poke(k)
-      val (expected, expectedHigh) = ExpGolombModel.encodeSingle(in, k)
+      val (expected, expectedHigh) = ExpGolombModel.encodeSingle(in, k, signed = false)
       c.out.expect(expected)
       c.high.expect(expectedHigh)
     }
@@ -64,10 +64,10 @@ class ExpGolombSpec extends AnyFlatSpec with ChiselScalatestTester {
       k <- 0 to 16
       in <- 0 to 1023
     } {
-      val (encoded, _) = ExpGolombModel.encodeSingle(in, k)
+      val (encoded, _) = ExpGolombModel.encodeSingle(in, k, signed = false)
       c.in.poke(encoded)
       c.k.poke(k)
-      c.out.expect(ExpGolombModel.decodeSingle(encoded, k))
+      c.out.expect(ExpGolombModel.decodeSingle(encoded, k, signedHighOption = None))
     }
   }
 
@@ -86,7 +86,7 @@ class ExpGolombSpec extends AnyFlatSpec with ChiselScalatestTester {
             in = Seq(a, b, c_, d, e)
           } {
             assert(in.length == widths.length)
-            val (expected, shiftExpected) = ExpGolombModel.encodeBlock(in, k, blockWidth)
+            val (expected, shiftExpected) = ExpGolombModel.encodeBlock(in, k, blockWidth, signed = false)
 
             c.in.zip(in).foreach { case (inHw, in) => inHw.poke(in) }
             c.k.poke(k)
@@ -113,7 +113,7 @@ class ExpGolombSpec extends AnyFlatSpec with ChiselScalatestTester {
           } yield k -> Seq(a, b, c_, d, e)
           assert(kInSeq.head._2.length == widths.length)
           val expectedShiftSeq = kInSeq.map {
-            case (k, in) => ExpGolombModel.encodeBlock(in, k, blockWidth)
+            case (k, in) => ExpGolombModel.encodeBlock(in, k, blockWidth, signed = false)
           }
           val ioDelay = ExpGolombBlock.encodeDelay(widths, kWidth, blockWidth)
 
@@ -155,8 +155,8 @@ class ExpGolombSpec extends AnyFlatSpec with ChiselScalatestTester {
             in = Seq(a, b, c_, d, e)
           } {
             assert(in.length == widths.length)
-            val (encoded, shift) = ExpGolombModel.encodeBlock(in, k, blockWidth)
-            val expected = ExpGolombModel.decodeBlock(encoded, blockWidth, in.length, k, shift)
+            val (encoded, shift) = ExpGolombModel.encodeBlock(in, k, blockWidth, signed = false)
+            val expected = ExpGolombModel.decodeBlock(encoded, blockWidth, in.length, k, shift, signed = false)
 
             c.in.poke(encoded)
             c.k.poke(k)
@@ -187,7 +187,8 @@ class ExpGolombSpec extends AnyFlatSpec with ChiselScalatestTester {
             e <- (0 until 4).map(_ * 85)
           } yield Seq(a, b, c_, d, e)
           assert(inSeq.head.length == n)
-          val expectedSeq = inSeq.map(ExpGolombModel.encodeTotalBlock(_, totalWidth, kWidth, shiftWidth))
+          val expectedSeq =
+            inSeq.map(ExpGolombModel.encodeTotalBlock(_, totalWidth, kWidth, shiftWidth, signed = false))
           val ioDelay = c.ioDelay
 
           c.in.valid.poke(true)
@@ -235,9 +236,11 @@ class ExpGolombSpec extends AnyFlatSpec with ChiselScalatestTester {
             e <- (0 until 4).map(_ * 85)
           } yield Seq(a, b, c_, d, e)
           assert(inSeq.head.length == n)
-          val encodedSeq = inSeq.map(ExpGolombModel.encodeTotalBlock(_, totalWidth, kWidth, shiftWidth))
+          val encodedSeq = inSeq.map(ExpGolombModel.encodeTotalBlock(_, totalWidth, kWidth, shiftWidth, signed = false))
           val expectedSeq = encodedSeq.map(
-            ExpGolombModel.decodeTotalBlock(_, totalWidth, n, kWidth, shiftWidth).map(_ & ((1 << width) - 1))
+            ExpGolombModel
+              .decodeTotalBlock(_, totalWidth, n, kWidth, shiftWidth, signed = false)
+              .map(_ & ((1 << width) - 1))
           )
           val ioDelay = c.ioDelay
 

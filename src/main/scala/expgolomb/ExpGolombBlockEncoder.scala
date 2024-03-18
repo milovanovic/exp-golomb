@@ -8,7 +8,7 @@ class ExpGolombBlockEncoder(n: Int, elemWidth: Int, totalBlockWidth: Int, kWidth
   require(n > 0, "n must be greater than zero")
   require(elemWidth > 0, "elemWidth must be greater than zero")
   private val maxK = (1 << kWidth) - 1
-  private val minBlockWidth = minTotalBlockWidth(n, elemWidth, kWidth, shiftWidth)
+  private val minBlockWidth = minTotalBlockWidth(n, Some(elemWidth), kWidth, shiftWidth, signed = false)
   require(totalBlockWidth >= minBlockWidth, s"totalBlockWidth is too small (try $minBlockWidth)")
   private val encodedBlockWidth = totalBlockWidth - kWidth - shiftWidth
 

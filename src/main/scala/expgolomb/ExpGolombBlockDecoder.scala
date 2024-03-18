@@ -5,7 +5,10 @@ import chisel3.util._
 import ModelUtils.minTotalBlockWidth
 
 class ExpGolombBlockDecoder(n: Int, elemWidth: Int, totalBlockWidth: Int, kWidth: Int, shiftWidth: Int) extends Module {
-  require(totalBlockWidth >= minTotalBlockWidth(n, elemWidth, kWidth, shiftWidth), "totalBlockWidth is too small")
+  require(
+    totalBlockWidth >= minTotalBlockWidth(n, Some(elemWidth), kWidth, shiftWidth, signed = false),
+    "totalBlockWidth is too small"
+  )
   val in = IO(Flipped(Decoupled(UInt(totalBlockWidth.W))))
   val out = IO(Decoupled(Vec(n, UInt(elemWidth.W))))
 
