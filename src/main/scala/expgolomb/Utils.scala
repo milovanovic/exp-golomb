@@ -55,20 +55,22 @@ object SumExtended {
     }
 
     useRegEnable.fold(reduce(in)) { enable =>
-      def internal(in: Seq[UInt]): UInt = {
-        if (in.length <= divideAndConquerThreshold) {
-          RegEnable(reduce(in), enable)
-        } else {
+      def recurse(in: Seq[UInt]): UInt = {
+        def base(in: Seq[UInt]): UInt = RegEnable(reduce(in), enable)
+        if (in.length <= divideAndConquerThreshold) base(in)
+        else {
           val (first, second) = in.splitAt(in.length / 2)
-          internal(Seq(first, second).map(internal))
+          if (in.length == 2 * divideAndConquerThreshold + 1) base(Seq(first, second).map(base))
+          else recurse(Seq(first, second).map(recurse))
         }
       }
-      internal(in)
+      recurse(in)
     }
   }
 
   def delay(inLength: Int): Int = {
     if (inLength <= divideAndConquerThreshold) 1
+    else if (inLength == 2 * divideAndConquerThreshold + 1) 2
     else {
       val first = delay(inLength / 2)
       val second = delay(inLength - inLength / 2)
@@ -106,7 +108,7 @@ object DynamicHighCat {
   */
 object BitWidth {
   def apply(in: Bits): UInt = {
-    Mux(in === 0.U, 0.U, Log2(in).asUInt +& 1.U)
+    Mux(in.asUInt === 0.U, 0.U, Log2(in).asUInt +& 1.U)
   }
 }
 
@@ -165,32 +167,39 @@ object MeanBitWidth {
   * each signal's dynamic high value) fits a requested bit-width.
   */
 object PackDropLSBs {
-  private def calculateMaxShift(widths: Seq[Int], outWidth: Int): Int = {
+  private def calculateMaxShift(widths: Seq[Int], outWidth: Int, minElemWidth: Int): Int = {
     @tailrec
     def internal(shift: Int): Int = {
       assert(shift < widths.max)
-      val shiftedTotalWidth = widths.map(w => (w - shift).max(1)).sum
+      val shiftedTotalWidth = widths.map(w => (w - shift).max(minElemWidth)).sum
       if (shiftedTotalWidth > outWidth) internal(shift + 1)
       else shift
     }
     internal(0)
   }
 
-  def apply(in: Seq[(Bits, UInt)], outWidth: Int, useRegEnable: Option[Bool]): (Seq[(Bits, UInt)], UInt) = {
+  def apply(
+    in:           Seq[(Bits, UInt)],
+    outWidth:     Int,
+    minElemWidth: Int,
+    useRegEnable: Option[Bool]
+  ): (Seq[(Bits, UInt)], UInt) = {
     require(in.nonEmpty)
     require(outWidth >= in.length, "outWidth is too small")
+    require(minElemWidth > 0, "minElemWidth must be greater than zero")
     val (fields, highs) = in.unzip
     require(fields.forall(_.widthKnown), "All elements of in must have known width")
     val widths = fields.map(_.getWidth)
 
     if (widths.sum <= outWidth) (in, 0.U)
     else {
-      val maxShift = calculateMaxShift(widths, outWidth)
+      val maxShift = calculateMaxShift(widths, outWidth, minElemWidth)
       val highSumDelay = SumExtended.delay(in.length)
+
       val shiftedHighsAndSums: Seq[(UInt, Seq[UInt])] = (0 to maxShift).map { shift =>
         val newHighs =
           if (shift == 0) highs
-          else highs.map { high => Mux(high > shift.U, high - shift.U, 0.U) }
+          else highs.map { high => Mux(high > shift.U +& (minElemWidth - 1).U, high - shift.U, (minElemWidth - 1).U) }
         val highSum = SumExtended(newHighs, useRegEnable)
         val newHighsDelayed = newHighs.map { high => ShiftRegisterCond(high, highSumDelay, useRegEnable) }
         (highSum, newHighsDelayed)
@@ -235,7 +244,7 @@ object PackDropLSBs {
   * Encodes or decodes a single integer.
   */
 object ExpGolombSingle {
-  def encode(in: UInt, k: UInt): (UInt, UInt) = {
+  def encodeUnsigned(in: UInt, k: UInt): (Bits, UInt) = {
     require(in.widthKnown, "Input data width must be known")
     val out = in +& (1.U << k).asUInt
     val outHighSet = Log2(out)
@@ -243,9 +252,22 @@ object ExpGolombSingle {
     (out, outHighFull)
   }
 
-  def decode(in: Bits, k: UInt): UInt = {
+  def encodeSigned(in: SInt, k: UInt): (Bits, UInt) = {
+    val invert = in < 0.S
+    val (uEncoded, uHigh) = encodeUnsigned(Mux(invert, ~in, in).asUInt, k)
+    (Mux(invert, uEncoded.asUInt | (1.U << (uHigh + 1.U)).asUInt, uEncoded), uHigh + 1.U)
+  }
+
+  def decodeUnsigned(in: Bits, k: UInt): UInt = {
     require(in.widthKnown, "Input data width must be known")
     in.asUInt - (1.U << k).asUInt
+  }
+
+  def decodeSigned(in: Bits, high: UInt, k: UInt): SInt = {
+    assert(high > 0.U, "high must be greater than zero")
+    val invert = in.apply(high)
+    val uDecoded = decodeUnsigned(ApplyHighMask(in, high - 1.U), k)
+    Mux(invert, ~uDecoded, uDecoded).asSInt
   }
 }
 
@@ -255,18 +277,51 @@ object ExpGolombSingle {
   * will be at least one bit wide, and will have at least one set bit.
   */
 object ExpGolombBlock {
-  def encode(in: Seq[UInt], k: UInt, blockWidth: Int, useRegEnable: Option[Bool]): (UInt, UInt) = {
-    require(blockWidth >= in.length, "blockWidth must be at least as large as the length of in")
+  def genericEncode[T <: Data](
+    in:              Seq[T],
+    k:               UInt,
+    blockWidth:      Int,
+    minEncodedWidth: Int,
+    useRegEnable:    Option[Bool],
+    encodeSingle:    (T, UInt) => (Bits, UInt),
+    shiftedAdjust:   (Bits, UInt) => (Bits, UInt)
+  ): (Bits, UInt) = {
     val encoded = in
-      .map(ExpGolombSingle.encode(_, k))
+      .map(encodeSingle(_, k))
       .map { case (field, high) => (RegEnableCond(field, useRegEnable), RegEnableCond(high, useRegEnable)) }
 
-    val (shifted, droppedLSBs) = PackDropLSBs(encoded, blockWidth, useRegEnable)
-    val adjusted = shifted.map { case (field, high) => (field.asUInt | (field === 0.U), high) }
+    val (shifted, droppedLSBs) = PackDropLSBs(encoded, blockWidth, minEncodedWidth, useRegEnable)
+    val adjusted = shifted.map(shiftedAdjust.tupled)
 
     val (cat, catHigh) = DynamicHighCat(adjusted, Some(blockWidth))
     val catShifted = cat << ((blockWidth - 1).U - catHigh)
     (WireDefault(UInt(blockWidth.W), catShifted.asUInt), droppedLSBs)
+  }
+
+  def encodeUnsigned(in: Seq[UInt], k: UInt, blockWidth: Int, useRegEnable: Option[Bool]): (Bits, UInt) = {
+    require(blockWidth >= in.length, "blockWidth must be at least as large as the length of in")
+    genericEncode(
+      in,
+      k,
+      blockWidth,
+      1,
+      useRegEnable,
+      ExpGolombSingle.encodeUnsigned,
+      (field, high) => (field.asUInt | (field === 0.U), high)
+    )
+  }
+
+  def encodeSigned(in: Seq[SInt], k: UInt, blockWidth: Int, useRegEnable: Option[Bool]): (Bits, UInt) = {
+    require(blockWidth >= 2 * in.length, "blockWidth must be at least as large as twice the length of in")
+    genericEncode(
+      in,
+      k,
+      blockWidth,
+      2,
+      useRegEnable,
+      ExpGolombSingle.encodeSigned,
+      (field, high) => (field.asUInt | (field === 0.U || field === (1.U << high)), high)
+    )
   }
 
   def encodeDelay(inWidths: Seq[Int], kWidth: Int, blockWidth: Int): Int = {
@@ -274,22 +329,52 @@ object ExpGolombBlock {
     1 + PackDropLSBs.delay(widths, blockWidth)
   }
 
-  def decode(in: UInt, numSamples: Int, k: UInt, shift: UInt): Seq[UInt] = {
+  def genericDecode[T <: Data](
+    in:               Bits,
+    numSamples:       Int,
+    k:                UInt,
+    shift:            UInt,
+    splitRecoverHead: (Bits, UInt, UInt, UInt, Boolean) => ((Bits, UInt), UInt),
+    decodeSingle:     (Bits, UInt, UInt) => T
+  ): Seq[T] = {
     require(in.widthKnown, "in must have a known width")
 
-    def recoverSamples(n: Int, high: UInt = (in.getWidth - 1).U): Seq[UInt] = {
+    def recoverSamples(n: Int, high: UInt): Seq[(Bits, UInt)] = {
       if (n > 0) {
-        val sig = if (n == numSamples) in else ApplyHighMask(in, high)
-        val highestSet = Log2(sig)
-        val prefixWidth = high - highestSet
-        val sampleWidthMinusOne = prefixWidth + prefixWidth + k
-        val samplePackedWidthMinusOne =
-          Mux(sampleWidthMinusOne > shift +& prefixWidth, sampleWidthMinusOne - shift, prefixWidth)
-        val low = high - samplePackedWidthMinusOne
-        val recovered = (sig >> low) << shift
-        recovered.asUInt +: recoverSamples(n - 1, low - 1.U)
+        val (headTuple, tailHigh) = splitRecoverHead(in, high, k, shift, n == numSamples)
+        headTuple +: recoverSamples(n - 1, tailHigh)
       } else Seq()
     }
-    recoverSamples(numSamples).map(ExpGolombSingle.decode(_, k))
+
+    recoverSamples(numSamples, (in.getWidth - 1).U).map { case (encoded, high) => decodeSingle(encoded, high, k) }
+  }
+
+  private def extractHeadUnsigned(in: Bits, high: UInt, k: UInt, shift: UInt, masked: Boolean): ((Bits, UInt), UInt) = {
+    val sig = if (masked) in else ApplyHighMask(in, high)
+    val highestSet = Log2(sig)
+    val prefixWidth = high - highestSet
+    val sampleWidthMinusOne = prefixWidth + prefixWidth + k
+    val samplePackedWidthMinusOne =
+      Mux(sampleWidthMinusOne > shift +& prefixWidth, sampleWidthMinusOne - shift, prefixWidth)
+    val low = high - samplePackedWidthMinusOne
+    val recovered = (sig >> low) << shift
+    ((recovered, samplePackedWidthMinusOne + shift), low - 1.U)
+  }
+
+  private def extractHeadSigned(sig: Bits, high: UInt, k: UInt, shift: UInt): ((Bits, UInt), UInt) = {
+    val invert = sig(high)
+    val uHead -> uHigh -> uTailHigh =
+      extractHeadUnsigned(ApplyHighMask(sig, high - 1.U), high - 1.U, k, shift, masked = true)
+    Mux(invert, uHead.asUInt | (1.U << (uHigh + 1.U)).asUInt, uHead) -> (uHigh + 1.U) -> uTailHigh
+  }
+
+  def decodeUnsigned(in: Bits, numSamples: Int, k: UInt, shift: UInt): Seq[UInt] = {
+    val decode = (enc, _: UInt, k) => ExpGolombSingle.decodeUnsigned(enc, k)
+    genericDecode(in, numSamples, k, shift, extractHeadUnsigned, decode)
+  }
+
+  def decodeSigned(in: Bits, numSamples: Int, k: UInt, shift: UInt): Seq[SInt] = {
+    val extractHead = (sig, high, k, shift, _: Boolean) => extractHeadSigned(sig, high, k, shift)
+    genericDecode(in, numSamples, k, shift, extractHead, ExpGolombSingle.decodeSigned)
   }
 }

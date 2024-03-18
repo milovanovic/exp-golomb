@@ -59,7 +59,7 @@ class TestablePackDropLSBs[T <: Bits](tIns: Seq[Bits], tHighs: Seq[UInt], blockW
   val outHighs = Seq.fill(tHighs.length)(IO(Output(UInt())))
   val outShift = IO(Output(UInt()))
 
-  val (res, resShift) = PackDropLSBs(ins.zip(inHighs), blockWidth, useRegEnable)
+  val (res, resShift) = PackDropLSBs(ins.zip(inHighs), blockWidth, 1, useRegEnable)
   val (resOuts, resHighs) = res.unzip
   outs.zip(resOuts).foreach { case (out, resOut) => out := resOut }
   outHighs.zip(resHighs).foreach { case (outHigh, resHigh) => outHigh := resHigh }
@@ -173,41 +173,49 @@ class UtilsSpec extends AnyFlatSpec with ChiselScalatestTester {
     }
   }
 
-  "SumExtended" should "calculate sum of max values with increasing widths" in test(
-    TestableExpression(
-      (1 to 16).map { i => UInt(i.W) },
-      None
-    ) { ins => Seq(SumExtended(ins, None)) }
-  ) { c =>
-    val ins = (1 to 16).map(i => (1 << i) - 1)
-    c.ins.zip(ins).foreach { case (inHw, in) => inHw.poke(in.U) }
-    c.outs.head.expect(ins.sum)
+  "SumExtended" should "calculate sum of max values with increasing widths" in {
+    for (n <- 1 to 16) {
+      test(
+        TestableExpression(
+          (1 to n).map { i => UInt(i.W) },
+          None
+        ) { ins => Seq(SumExtended(ins, None)) }
+      ) { c =>
+        val ins = (1 to n).map(i => (1 << i) - 1)
+        c.ins.zip(ins).foreach { case (inHw, in) => inHw.poke(in.U) }
+        c.outs.head.expect(ins.sum)
+      }
+    }
   }
 
-  it should "be pipeline-able with the correct io delay" in test(
-    TestableExpression(
-      (1 to 16).map { i => UInt(i.W) },
-      None
-    ) { ins => Seq(SumExtended(ins, Some(true.B))) }
-  ) { c =>
-    val ioDelay = SumExtended.delay(c.ins.length)
-    val insIns = Seq.tabulate(ioDelay) { i => (1 to 16).map(j => ((1 << j) - 1 - i).max(0)) }
-    val outs = insIns.map(_.sum)
+  it should "be pipeline-able with the correct io delay" in {
+    for (n <- 1 to 16) {
+      test(
+        TestableExpression(
+          (1 to n).map { i => UInt(i.W) },
+          None
+        ) { ins => Seq(SumExtended(ins, Some(true.B))) }
+      ) { c =>
+        val ioDelay = SumExtended.delay(c.ins.length)
+        val insIns = Seq.tabulate(ioDelay) { i => (1 to n).map(j => ((1 << j) - 1 - i).max(0)) }
+        val outs = insIns.map(_.sum)
 
-    for (ins <- insIns) {
-      c.ins.zip(ins).foreach { case (inHw, in) => inHw.poke(in) }
-      c.clock.step(1)
-    }
+        for (ins <- insIns) {
+          c.ins.zip(ins).foreach { case (inHw, in) => inHw.poke(in) }
+          c.clock.step(1)
+        }
 
-    for (ins -> expected <- insIns.reverse.zip(outs)) {
-      c.ins.zip(ins).foreach { case (inHw, in) => inHw.poke(in) }
-      c.outs.head.expect(expected)
-      c.clock.step(1)
-    }
+        for (ins -> expected <- insIns.reverse.zip(outs)) {
+          c.ins.zip(ins).foreach { case (inHw, in) => inHw.poke(in) }
+          c.outs.head.expect(expected)
+          c.clock.step(1)
+        }
 
-    for (out <- outs.reverse) {
-      c.outs.head.expect(out)
-      c.clock.step(1)
+        for (out <- outs.reverse) {
+          c.outs.head.expect(out)
+          c.clock.step(1)
+        }
+      }
     }
   }
 
